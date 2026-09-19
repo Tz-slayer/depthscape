@@ -264,7 +264,13 @@ qs -p tools/layer-stacking-test
 - `plugin.json` 通过 DMS 官方 schema（`PLUGINS/plugin-schema.json`）校验
 - registry 条目：[`dist/tz-slayer-depthscape.json`](dist/tz-slayer-depthscape.json)
   —— 内容需与 `plugin.json` 的 `id` / `name` 完全一致，仓库地址与截图 URL 必须可达
-- 商店预览卡：`https://api.danklinux.com/previews/depthscape`
+- 提交 PR：<https://github.com/AvengeMedia/dms-plugin-registry/pull/909>
+  （两个官方校验脚本 `generate.py --validate` 与 `validate_links.py` 均通过）
+- 商店预览卡：<https://api.danklinux.com/previews/depthscape>
+
+`compositors` 只声明了 `niri`——那是唯一实测过的合成器。插件不调用任何
+niri 专用接口，机制是 wlr-layer-shell 的同层 map 顺序，Hyprland 理论上同样成立，
+但尚未验证，所以没有写进去。
 
 ## 许可
 
