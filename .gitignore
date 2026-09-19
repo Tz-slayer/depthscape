@@ -1,0 +1,12 @@
+# Rust build output
+/engine/target/
+
+# Written by tools/make-preview.py
+/preview.html
+
+# Local assistant workspace state (notes, scratch) — not part of the plugin
+/.workbuddy-ai/
+
+# Python bytecode
+__pycache__/
+*.pyc

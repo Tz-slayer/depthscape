@@ -1,0 +1,32 @@
+{
+    "id": "depthscape",
+    "name": "Depthscape",
+    "description": "AI depth-aware wallpapers: foreground scenery occludes desktop widgets, like an iOS lock screen",
+    "version": "0.1.0",
+    "author": "Tz-slayer",
+    "repository": "https://github.com/Tz-slayer/depthscape",
+    "type": "composite",
+    "capabilities": [
+        "daemon",
+        "desktop-widget",
+        "ai"
+    ],
+    "icon": "layers",
+    "components": {
+        "daemon": "./qml/DepthDaemon.qml",
+        "desktop": "./qml/DepthStatusWidget.qml"
+    },
+    "settings": "./qml/DepthSettings.qml",
+    "startupCheck": "./qml/StartupCheck.qml",
+    "requires_dms": ">=1.5.0",
+    "dependencies": [
+        "curl",
+        "qt6-5compat (QML module Qt5Compat.GraphicalEffects, used by qml/DepthForeground.qml)"
+    ],
+    "permissions": [
+        "settings_read",
+        "settings_write",
+        "process",
+        "network"
+    ]
+}

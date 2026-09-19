@@ -1,0 +1,32 @@
+[package]
+name = "depthscape-engine"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Depth-aware wallpaper scene engine for DankMaterialShell"
+license = "MIT"
+
+[[bin]]
+name = "depthscape-engine"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+blake3 = "1"
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "webp",
+] }
+ort = "=2.0.0-rc.13"
+ndarray = "0.17"
+libc = "0.2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

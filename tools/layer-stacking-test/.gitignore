@@ -1,0 +1,11 @@
+# Symlink farm created by setup.sh — points at a local DankMaterialShell tree.
+/assets
+/Common
+/DankCommon
+/Modals
+/Modules
+/Shaders
+/Services
+/Widgets
+/*.qml
+!shell.qml
