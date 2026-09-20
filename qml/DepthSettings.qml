@@ -25,6 +25,13 @@ PluginSettings {
     }
 
     ToggleSetting {
+        settingKey: "backgroundLayer"
+        label: "Draw in the backdrop"
+        description: "Use the background layer so the niri overview shares one composite instead of repeating it in every workspace card. Desktop widgets will sit above the foreground."
+        defaultValue: true
+    }
+
+    ToggleSetting {
         settingKey: "autoGenerate"
         label: "Generate automatically"
         description: "Rebuild the mask whenever the wallpaper or a parameter changes"

@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import Quickshell.Wayland
 import qs.Common
 import qs.Services
 import qs.Modules.Plugins
@@ -21,6 +22,21 @@ PluginComponent {
     readonly property bool autoGenerate: pluginData.autoGenerate ?? true
     readonly property int thresholdPercent: pluginData.threshold ?? 30
     readonly property int featherPercent: pluginData.feather ?? 8
+
+    // Which layer-shell layer the foreground surface is mapped on.
+    //
+    // `background` (the default) is what makes the niri overview behave: niri
+    // only treats a layer surface as part of the backdrop — the area shared by
+    // every workspace card — when it is on `background`. On `bottom` the
+    // compositor reproduces the surface inside each workspace card instead, so
+    // the cut-out appears once per workspace rather than once overall.
+    //
+    // The trade-off is fixed by wlr-layer-shell: a background surface can never
+    // draw above anything on `bottom`, and DMS maps desktop widgets on `bottom`
+    // (DesktopPluginWrapper.qml). So with this on, desktop widgets sit *above*
+    // the foreground and are not occluded by it. `bottom` restores the old
+    // behaviour — widgets get covered, at the cost of the per-card duplication.
+    readonly property bool backgroundLayer: pluginData.backgroundLayer ?? true
 
     readonly property real threshold: thresholdPercent / 100
     readonly property real feather: featherPercent / 100
@@ -496,9 +512,10 @@ PluginComponent {
     // self-created PanelWindow can provide.
     //
     // The Loader exists so the surfaces can be destroyed and re-created, which
-    // is the only way to change their position within the `bottom` layer: layer
-    // surfaces stack by map order, and there is no "raise" request in
-    // wlr-layer-shell. See raiseForeground().
+    // is the only way to change their position *within* a layer: layer surfaces
+    // stack by map order, and there is no "raise" request in wlr-layer-shell.
+    // That matters only on `bottom`, where we share the layer with the desktop
+    // widgets. See raiseForeground().
     Loader {
         id: foregroundLoader
 
@@ -511,6 +528,7 @@ PluginComponent {
                     required property var modelData
 
                     targetScreen: modelData
+                    layer: root.backgroundLayer ? WlrLayer.Background : WlrLayer.Bottom
                     wallpaperPath: root.effectEnabled ? root.wallpaperFor(modelData.name) : ""
                     maskPath: root.effectEnabled ? root.maskPathFor(modelData.name) : ""
                 }
@@ -530,6 +548,12 @@ PluginComponent {
     }
 
     function raiseForeground() {
+        // On `background` there is nothing to race against: widgets live on
+        // `bottom`, a strictly higher layer, so map order within our layer
+        // cannot put us behind them. Re-mapping would only cause a visible
+        // flicker for no gain, so skip it entirely.
+        if (root.backgroundLayer)
+            return;
         foregroundLoader.active = false;
         remapTimer.restart();
     }

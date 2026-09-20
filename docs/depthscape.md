@@ -919,9 +919,9 @@ Local Cache
 ```text
 Wallpaper
    ↓
-Desktop Widgets
-   ↓
 Foreground Subject
+   ↓
+Desktop Widgets          ← 注意：默认 `background` 层下，Widget 在前景之上
    ↓
 Normal Application Windows
 ```
@@ -931,6 +931,11 @@ QML 中的 `z: 999` 只对同一个 QtQuick scene / surface 内部有效，
 但它并不像原先设想的那样需要改动 DMS 核心。
 
 **结论：不需要 patch DMS，靠 layer-shell 的层级 + 同层 map 顺序即可实现。**
+
+> 默认层是 `background`（见下），所以默认的堆叠是
+> `Wallpaper < Foreground < Desktop Widgets < Windows`。
+> 想要 `Wallpaper < Widgets < Foreground < Windows`（前景遮挡 Widget），
+> 把 `backgroundLayer` 关掉即可回到 `bottom` 层，代价是 overview 逐卡片复制。
 
 #### 层间顺序
 
@@ -974,20 +979,37 @@ values: [...(SettingsData.desktopWidgetInstances || [])].reverse()
 
 #### 由此确定的两条设计约束
 
-**1. 前景必须放在 `bottom` 层。**
+**1. 前景放在 `background` 层（默认）还是 `bottom` 层。**
 
-- `background`：会被桌面 Widget 盖住，前景永远不可见；
-- `top` / `overlay`：会盖住普通应用窗口，不可接受；
-- `bottom`：正好落在「壁纸与 Widget 之上、应用窗口之下」。
+这里有一个**取舍**，通过 `backgroundLayer` 设置切换（默认 `true`）：
 
-**2. 前景必须在桌面 Widget 之后 map。**
+- **`background`（默认）**：niri 只有把 layer surface 视为 **backdrop** 的一部分
+  （overview 中所有 workspace card 共享的那块背景），才不会把它**克隆进每个
+  workspace card**。放在 `background` 上，overview 里整个画面只出现**一次**合成体
+  （人物 + 壁纸），这正是这个插件想要的；代价是 desktop Widget 在 `bottom` 层、
+  **必然盖在前景之上**，前景无法遮挡 Widget。
+- **`bottom`**：前景能盖住 desktop Widget，但 niri 会把它逐 workspace card 复制，
+  overview 里会看到人物在每个卡片里各出现一次。
+
+`top` / `overlay` 两种都不考虑：会盖住普通应用窗口。
+
+> 实测（niri 26.04）：`layer: WlrLayer.Background` 生效后，
+> overview 的 backdrop 里出现的是**完整的合成体**（人物 + 模糊壁纸），
+> 而 workspace card 里是**清晰的合成体**——各一次，没有逐卡片复制。
+> 桌面本体上合成也正常。A/B 截图对比见 `2026-09-20.md`。
+
+**2. 只有在 `bottom` 层才需要抢 map 顺序。**
 
 `wlr-layer-shell` 没有「raise」请求，唯一手段是销毁并重建 surface
 （`unmap` 会把 surface 从 `LayerMap` 中移除，重新 `map` 即追加到末尾）。
 DMS 在 Widget 列表变化时会重建它自己的全部 Widget surface，
-届时 depthscape 的前景会被压在后面，因此 `DepthDaemon` 监听
+届时 `bottom` 层上的 depthscape 前景会被压在后面，因此 `DepthDaemon` 监听
 `SettingsData.desktopWidgetInstances`，等 DMS 自己的去抖（150ms + 32ms）结束后
 再重建前景 surface。
+
+**在 `background` 层上这套机制完全不必要**——Widget 在 `bottom`，是严格更高的层，
+层内 map 顺序再怎么变也压不到我们上面。`raiseForeground()` 因此在
+`backgroundLayer` 为真时**直接返回**，避免无谓的重建闪烁。
 
 **但 `desktopWidgetInstances` 不是唯一的触发条件。** 读
 `DesktopWidgetLayer.qml` 可以看到它有两个去抖入口：

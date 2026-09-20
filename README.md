@@ -17,6 +17,8 @@ compositing, so nothing is inferred while you work.
 - Three-tier cache: dragging the sliders never re-runs the model
 - One mask per monitor
 - Click-through foreground layer, so the widgets underneath stay usable
+- Drawn on the `background` layer, so the niri overview shows one shared
+  composite instead of repeating the cut-out inside each workspace card
 - Desktop status tile and a settings page
 
 ## Requirements

@@ -1,7 +1,7 @@
 {
     "id": "depthscape",
     "name": "Depthscape",
-    "description": "AI depth-aware wallpapers: foreground scenery occludes desktop widgets, like an iOS lock screen",
+    "description": "AI depth-aware wallpapers: the wallpaper foreground is cut out and drawn on a lower layer, so desktop widgets and application windows pass in front of it",
     "version": "0.1.0",
     "author": "Tz-slayer",
     "repository": "https://github.com/Tz-slayer/depthscape",

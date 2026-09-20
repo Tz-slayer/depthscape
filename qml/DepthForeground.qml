@@ -14,12 +14,17 @@ import Qt5Compat.GraphicalEffects
 // only because a plugin may create its own PanelWindow, the same technique
 // DankIsland uses for its overlay surface.
 //
-// STACKING CAVEAT — read before moving this surface to another layer.
+// STACKING — read before changing the layer.
 //
-// DMS draws desktop widgets on `bottom` too (DesktopPluginWrapper.qml, the
-// default branch of `WlrLayershell.layer`), not on `background` as the plugin
-// docs claim. So the foreground shares a layer with the widgets it is supposed
-// to occlude, and the layer-shell *layer* alone does not order the two.
+// The layer is set by the caller (`DepthDaemon.backgroundLayer`), defaulting to
+// `background`. `background` is a strictly lower layer than `bottom`, so on it
+// the foreground sits below the desktop widgets and cannot ever occlude them.
+//
+// Under `bottom` the ordering is subtler: DMS draws desktop widgets on `bottom`
+// too (DesktopPluginWrapper.qml, the default branch of `WlrLayershell.layer`),
+// not on `background` as the plugin docs claim. So the foreground shares a
+// layer with the widgets it is supposed to occlude, and the layer-shell *layer*
+// alone does not order the two.
 //
 // Within a layer, niri/smithay stack surfaces by **map order**: the surface
 // mapped last is drawn on top (measured, see docs/depthscape.md §14.1).
@@ -51,9 +56,9 @@ PanelWindow {
     // (DankIsland's IslandWindow uses the same indirection.)
     required property var targetScreen
 
-    // Overridable so the component stays testable, and because a compositor
-    // that does not place regular windows between `bottom` and `top` would
-    // need a different layer (see docs/depthscape.md §14.1).
+    // Set by DepthDaemon. Defaults to `bottom`, the conservative choice for a
+    // standalone host; the daemon overrides it with `background` by default so
+    // the niri overview shares one composite instead of cloning it per card.
     property int layer: WlrLayer.Bottom
 
     property string wallpaperPath: ""
