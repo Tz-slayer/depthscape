@@ -17,6 +17,8 @@ compositing, so nothing is inferred while you work.
 - Three-tier cache: dragging the sliders never re-runs the model
 - One mask per monitor
 - Click-through foreground layer, so the widgets underneath stay usable
+- Navigation parallax: the scene shifts as you change workspace or column, with
+  the foreground moving further than the background
 - Desktop status tile and a settings page
 
 ## Requirements

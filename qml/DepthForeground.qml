@@ -59,6 +59,20 @@ PanelWindow {
     property string wallpaperPath: ""
     property string maskPath: ""
 
+    // Parallax offsets in output logical pixels, supplied by DepthParallax.
+    // The two layers are moved by different amounts so the scene reads as
+    // having depth; see the LAYERING note below.
+    property real backgroundX: 0
+    property real backgroundY: 0
+    property real foregroundX: 0
+    property real foregroundY: 0
+
+    // Spare area the background layer must carry, in output logical pixels, so
+    // that shifting it never pulls its border into view. Supplied by the
+    // tracker, which is the only thing that knows how far an offset can reach.
+    property real reserveX: 0
+    property real reserveY: 0
+
     readonly property bool active: wallpaperPath !== "" && maskPath !== ""
 
     screen: root.targetScreen
@@ -83,35 +97,145 @@ PanelWindow {
     // desktop widgets underneath keep receiving input normally.
     mask: Region {}
 
-    // The wallpaper, kept off-screen: only its texture is used.
-    Image {
-        id: wallpaperImage
+    // LAYERING — why this surface draws the wallpaper twice.
+    //
+    // With no parallax there is only one thing to draw: the masked foreground.
+    // The background is the compositor's own wallpaper, which is a separate
+    // surface beneath this one and needs no help from us.
+    //
+    // Parallax breaks that arrangement. Two layers can only move by different
+    // amounts if we own both of them, and the compositor's wallpaper cannot be
+    // asked to shift. So this surface also draws the full wallpaper underneath
+    // its own foreground copy, and the two move at different rates.
+    //
+    // The duplicate is not visible at rest: both copies are the same image at
+    // the same scale, and the foreground sits exactly on top of the region it
+    // was cut from. It only becomes visible while navigating, which is the
+    // whole point.
+    //
+    // The alternative -- moving only the foreground and leaving the
+    // compositor's wallpaper still -- was rejected. It is cheaper, but a
+    // floating cut-out over a pinned background reads as a rendering glitch
+    // rather than as depth, because the foreground sliding away from the
+    // scenery it is composited from is exactly what a misaligned mask looks
+    // like.
 
-        anchors.fill: parent
-        source: root.wallpaperPath !== "" ? "file://" + root.wallpaperPath : ""
-        fillMode: Image.PreserveAspectCrop
-        cache: false
-        visible: false
-        layer.enabled: true
+    // BACKGROUND COPY — the whole wallpaper, unmasked.
+    //
+    // This layer is the one that can expose an edge: behind it there is only
+    // the compositor's own wallpaper. It therefore carries spare area around
+    // the viewport, so a shift slides new material into view instead of
+    // revealing a gap.
+    //
+    // Two ways to get that spare area, and only one is correct:
+    //
+    //   * `scale: 1 + eps` -- rejected. Scaling resamples about the layer's
+    //     centre, which on its own displaces the background relative to the
+    //     foreground by `size * eps / 2`: 25 logical pixels at a 2% overscan,
+    //     larger than the parallax travel itself. The scene would be visibly
+    //     doubled whenever the user stood still.
+    //
+    //   * A larger outer box with the image sized to the *viewport*, centred
+    //     inside it -- what this does. The image keeps the exact geometry the
+    //     foreground uses, so the two agree pixel for pixel at rest, and the
+    //     surrounding spare area is what allows a shift. Overscan and parallax
+    //     are therefore independent: the offsets below are applied on top of an
+    //     image that has not moved at all.
+    readonly property int backgroundOverscan: {
+        // Cover the largest offset this layer can reach, from either direction,
+        // with a margin so an extreme travel still does not clip.
+        const travel = Math.max(reserveX, reserveY);
+        return Math.ceil(travel) + 8;
     }
 
-    // The mask is RGBA with the coverage in the alpha channel (see
-    // docs/depthscape.md §7.2). OpacityMask reads exactly that alpha.
-    Image {
-        id: maskImage
+    Item {
+        id: backgroundLayer
 
-        anchors.fill: parent
-        source: root.maskPath !== "" ? "file://" + root.maskPath : ""
-        fillMode: Image.PreserveAspectCrop
-        cache: false
-        visible: false
-        layer.enabled: true
+        // The viewport box, grown outwards by the overscan. Its centre is the
+        // viewport's centre, so a child centred in it is centred on screen.
+        x: -root.backgroundOverscan
+        y: -root.backgroundOverscan
+        width: parent.width + 2 * root.backgroundOverscan
+        height: parent.height + 2 * root.backgroundOverscan
+
+        Image {
+            id: backgroundImage
+
+            // Sized to the viewport, not to the enlarged box -- see the note
+            // above. Centring it in the box keeps it aligned with the
+            // foreground, which spans the viewport exactly.
+            width: parent.width - 2 * root.backgroundOverscan
+            height: parent.height - 2 * root.backgroundOverscan
+            anchors.centerIn: parent
+            source: root.wallpaperPath !== "" ? "file://" + root.wallpaperPath : ""
+            fillMode: Image.PreserveAspectCrop
+            cache: false
+            visible: false
+            layer.enabled: true
+        }
+
+        // The parallax shift is applied here, around the image rather than on
+        // it, so it composes with the centring above instead of fighting it.
+        transform: Translate {
+            x: root.backgroundX
+            y: root.backgroundY
+        }
     }
 
-    OpacityMask {
+    // Foreground copy: the wallpaper cut to the mask. Both inputs shift
+    // FOREGROUND COPY — the wallpaper cut to the mask.
+    //
+    // Both inputs shift together, so the cut-out stays aligned with the scenery
+    // it was taken from; a mask that lags its own image is the classic
+    // misregistration artefact and would read as a halo.
+    //
+    // Unlike the background this layer needs no spare area. Where it moves away
+    // from, the background layer is already exposed, and that is precisely the
+    // intended effect: the near scenery slides aside and reveals what was
+    // behind it. There is no gap to fill because the layer below is opaque.
+    Item {
+        id: foregroundLayer
+
         anchors.fill: parent
-        source: wallpaperImage
-        maskSource: maskImage
+
+        // The wallpaper, kept off-screen: only its texture is used.
+        Image {
+            id: wallpaperImage
+
+            anchors.fill: parent
+            source: root.wallpaperPath !== "" ? "file://" + root.wallpaperPath : ""
+            fillMode: Image.PreserveAspectCrop
+            cache: false
+            visible: false
+            layer.enabled: true
+        }
+
+        // The mask is RGBA with the coverage in the alpha channel (see
+        // docs/depthscape.md §7.2). OpacityMask reads exactly that alpha.
+        Image {
+            id: maskImage
+
+            anchors.fill: parent
+            source: root.maskPath !== "" ? "file://" + root.maskPath : ""
+            fillMode: Image.PreserveAspectCrop
+            cache: false
+            visible: false
+            layer.enabled: true
+        }
+
+        OpacityMask {
+            anchors.fill: parent
+            source: wallpaperImage
+            maskSource: maskImage
+        }
+
+        // Applied to the whole layer, so the mask travels with the image it
+        // masks. `Translate` rather than `x`/`y` so it does not disturb the
+        // `anchors.fill` above.
+        transform: Translate {
+            x: root.foregroundX
+            y: root.foregroundY
+        }
     }
 }
 
