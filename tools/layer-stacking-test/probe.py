@@ -44,12 +44,24 @@ def parse_size(text: str) -> tuple[int, int]:
 
 
 def sample(mask: np.ndarray, wallpaper: np.ndarray, xs: np.ndarray, ys: np.ndarray):
-    """Nearest-neighbour sample of the mask alpha and wallpaper at screenshot px."""
-    height, width = mask.shape[:2]
-    ix = np.clip((xs * (width / _surface_w)).round().astype(int), 0, width - 1)
-    iy = np.clip((ys * (height / _surface_h)).round().astype(int), 0, height - 1)
-    alpha = mask[iy[:, None], ix[None, :], 3].astype(np.float32) / 255.0
-    rgb = wallpaper[iy[:, None], ix[None, :], :].astype(np.float32)
+    """Nearest-neighbour sample of the mask alpha and wallpaper at screenshot px.
+
+    The two images have independent resolutions — the mask is emitted at the
+    refinement resolution, which for a high-resolution wallpaper is smaller than
+    the wallpaper itself — so each is sampled on its own grid. Indexing the
+    wallpaper with the mask's coordinates happened to be correct only while the
+    two sizes matched, and silently read the wrong region once they stopped.
+    """
+    mask_h, mask_w = mask.shape[:2]
+    wall_h, wall_w = wallpaper.shape[:2]
+
+    mx = np.clip((xs * (mask_w / _surface_w)).round().astype(int), 0, mask_w - 1)
+    my = np.clip((ys * (mask_h / _surface_h)).round().astype(int), 0, mask_h - 1)
+    wx = np.clip((xs * (wall_w / _surface_w)).round().astype(int), 0, wall_w - 1)
+    wy = np.clip((ys * (wall_h / _surface_h)).round().astype(int), 0, wall_h - 1)
+
+    alpha = mask[my[:, None], mx[None, :], 3].astype(np.float32) / 255.0
+    rgb = wallpaper[wy[:, None], wx[None, :], :].astype(np.float32)
     return alpha, rgb
 
 

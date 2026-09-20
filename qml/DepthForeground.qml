@@ -34,9 +34,9 @@ import Qt5Compat.GraphicalEffects
 // reliably here. Measured: 28 of 63 opaque sample points came out unmasked,
 // with `layer.effect: MultiEffect` and with MultiEffect-as-an-item alike.
 // The cause is that `layer.enabled: true` on an *invisible* Image does not
-// reliably produce an up-to-date layer texture, and the mask Image (1.4 MB PNG,
-// 5120x2880) is exactly that. `OpacityMask` keeps its sources live internally,
-// and measured 63/63 correct on the same fixture.
+// reliably produce an up-to-date layer texture, and the mask Image is exactly
+// that. `OpacityMask` keeps its sources live internally, and measured 63/63
+// correct on the same fixture.
 //
 // The cost is a dependency DMS itself does not use: Qt5Compat.GraphicalEffects
 // (packaged as qt6-5compat / qml6-module-qt5compat-graphicaleffects). It is

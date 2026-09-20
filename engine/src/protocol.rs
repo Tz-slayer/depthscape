@@ -41,12 +41,29 @@ pub struct CacheInfo {
 pub struct AnalyzeReport {
     pub maskPath: String,
     pub wallpaperPath: String,
+    /// Wallpaper dimensions.
     pub width: u32,
     pub height: u32,
+    /// Mask dimensions. Equal to the wallpaper below the refinement cap, and
+    /// smaller above it — see `pipeline::mask_size`.
+    pub maskWidth: u32,
+    pub maskHeight: u32,
     pub depthCacheHit: bool,
     pub refinedCacheHit: bool,
     pub maskCacheHit: bool,
     pub elapsedMs: u64,
+    pub timings: TimingsReport,
+}
+
+/// Per-stage costs, so a slow run can be attributed without instrumentation.
+#[derive(Serialize)]
+pub struct TimingsReport {
+    pub hashMs: u64,
+    pub decodeMs: u64,
+    pub depthMs: u64,
+    pub refineMs: u64,
+    pub maskMs: u64,
+    pub pruneMs: u64,
 }
 
 #[derive(Serialize)]
@@ -102,10 +119,20 @@ impl From<AnalyzeOutcome> for AnalyzeReport {
             wallpaperPath: outcome.wallpaper_path.display().to_string(),
             width: outcome.width,
             height: outcome.height,
+            maskWidth: outcome.mask_width,
+            maskHeight: outcome.mask_height,
             depthCacheHit: outcome.depth_cache_hit,
             refinedCacheHit: outcome.refined_cache_hit,
             maskCacheHit: outcome.mask_cache_hit,
             elapsedMs: outcome.elapsed_ms as u64,
+            timings: TimingsReport {
+                hashMs: outcome.timings.hash_ms as u64,
+                decodeMs: outcome.timings.decode_ms as u64,
+                depthMs: outcome.timings.depth_ms as u64,
+                refineMs: outcome.timings.refine_ms as u64,
+                maskMs: outcome.timings.mask_ms as u64,
+                pruneMs: outcome.timings.prune_ms as u64,
+            },
         }
     }
 }

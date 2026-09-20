@@ -58,6 +58,20 @@ niri msg action screenshot-screen --path /tmp/a.png
 Note that `niri msg action screenshot-screen` captures the *focused* output, and
 that the file appears a moment after the command returns.
 
+Two traps worth knowing:
+
+* **Starting the harness moves focus to another output** (observed: DP-3, while
+  the panels under test live on DP-1). Check the capture's pixel size against the
+  output you meant to shoot *before* trusting any number: DP-1 at scale 1.5 gives
+  3840x2160, DP-3 gives 2560x1440. If it is wrong, `niri msg action
+  focus-monitor-left` and capture again — and re-check, because a capture of the
+  wrong output still produces plausible-looking MAE numbers.
+* `probe.py` samples the mask and the wallpaper on **independent grids**, because
+  the mask is emitted at the refinement resolution and is therefore smaller than
+  the wallpaper. Do not fold that back into a single index: it silently reads the
+  wrong region of the wallpaper, which is exactly the bug that surfaced when the
+  mask stopped matching the wallpaper's size.
+
 ## Reading the result
 
 `probe.py` does not sample a point. It tests two competing hypotheses over the
@@ -82,30 +96,35 @@ python3 tools/layer-stacking-test/probe.py \
 
 Add `--logical 2560x1440` if the output is not 2560x1440 logical.
 
-## Measured result (2026-09-19, niri 26.04, DP-1 @ scale 1.5)
+## Measured result (niri 26.04, DP-1 @ scale 1.5)
+
+Last re-measured 2026-09-20, with the mask emitted at the refinement resolution
+(1920x1080 for this 5120x2880 wallpaper) instead of the wallpaper's own size.
+These numbers are what confirm the mask is sampled and scaled correctly at any
+resolution: the compositing model still matches the pixels to ~1/255.
 
 Capture taken 14 s in, i.e. after `W2` has been mapped on top of the foreground:
 
 ```
-W2 cyan     MAE[foreground on top] 104.32   MAE[widget on top]   0.00  -> WIDGET
-W1 magenta  MAE[foreground on top]   0.63   MAE[widget on top]  14.36  -> FOREGROUND
+W2 cyan     MAE[foreground on top] 104.39   MAE[widget on top]   0.00  -> WIDGET
+W1 magenta  MAE[foreground on top]   1.25   MAE[widget on top]  14.93  -> FOREGROUND
 ```
 
 `0.00` on `W2` means the panel was pixel-for-pixel pure cyan — the late-mapped
 widget was completely in front. The bug is real.
 
-Then `qs ipc -i <instance> call depthscape raise`, wait ~2 s, capture again:
+Then `qs ipc -i <instance> call depthscape raise`, wait ~3 s, capture again:
 
 ```
-W2 cyan     MAE[foreground on top]   1.08   MAE[widget on top] 104.35  -> FOREGROUND
-W1 magenta  MAE[foreground on top]   0.63   MAE[widget on top]  14.36  -> FOREGROUND
+W2 cyan     MAE[foreground on top]   1.20   MAE[widget on top] 104.35  -> FOREGROUND
+W1 magenta  MAE[foreground on top]   1.25   MAE[widget on top]  14.93  -> FOREGROUND
 ```
 
 The foreground is back on top, and the observed pixels match the mask model to
-within 1.08/255 — the residual wedge of cyan still visible in the lower-left of
+within 1.20/255 — the residual wedge of cyan still visible in the lower-left of
 the panel is the part of the mask that is genuinely transparent there, not a
-failure. Checked against the mask directly: that rect is 21.76 % `alpha < 0.05`
-and 26.21 % `alpha < 0.5`, while 23.74 % of it reads as pure cyan — between the
+failure. Checked against the mask directly: that rect is 21.81 % `alpha < 0.05`
+and 26.28 % `alpha < 0.5`, while 20.70 % of it reads as pure cyan — between the
 two, the difference being the semi-transparent fringe.
 
 `W1` reports identical numbers in both states, which is the control: it sits in a

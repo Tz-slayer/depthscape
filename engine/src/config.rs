@@ -30,9 +30,14 @@ pub const PATCH_SIZE: u32 = 14;
 /// Bump when the depth post-processing changes (invalidates depth + mask).
 pub const DEPTH_PIPELINE_VERSION: u32 = 1;
 /// Bump when only mask generation changes (invalidates masks, keeps depth).
-pub const MASK_PIPELINE_VERSION: u32 = 1;
+///
+/// v2 emits the mask at the refinement resolution instead of the wallpaper's.
+pub const MASK_PIPELINE_VERSION: u32 = 2;
 
 /// Guided-filter refinement is capped at this long edge to bound cost.
+///
+/// This is also the ceiling for the mask, which is derived from the refined
+/// field and cannot out-resolve it.
 pub const REFINEMENT_MAX_DIMENSION: u32 = 1920;
 pub const GUIDED_FILTER_RADIUS: u32 = 8;
 pub const GUIDED_FILTER_EPSILON: f32 = 0.001;

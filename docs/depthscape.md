@@ -414,7 +414,7 @@ wallpaper.png / jpg / webp
 ```text
 cache/depth/<key>.dsc     模型原始输出，f32，推理分辨率
 cache/refined/<key>.dsr   精修后的深度，u16，精修分辨率
-cache/masks/<key>.png     遮罩，RGBA（alpha 即覆盖度），原分辨率
+cache/masks/<key>.png     遮罩，RGBA（alpha 即覆盖度），细化分辨率
 ```
 
 接口：
@@ -431,12 +431,23 @@ depthscape-engine analyze --wallpaper <path> --threshold 0.30 --feather 0.08
   "wallpaperPath": "...",
   "width": 2340,
   "height": 1316,
+  "maskWidth": 1920,
+  "maskHeight": 1080,
   "depthCacheHit": true,
   "refinedCacheHit": true,
   "maskCacheHit": false,
-  "elapsedMs": 86
+  "elapsedMs": 86,
+  "timings": {
+    "hashMs": 1, "decodeMs": 0, "depthMs": 0,
+    "refineMs": 1, "maskMs": 8, "pruneMs": 0
+  }
 }
 ```
+
+> `width` / `height` 是壁纸尺寸，`maskWidth` / `maskHeight` 是遮罩尺寸。
+> 遮罩按细化分辨率输出，因此通常**小于**壁纸（见 §11）；
+> 消费侧按比例缩放即可，不需要两者相等。
+> `timings` 是各阶段的独占耗时，用来在不出动 profiler 的情况下定位慢在哪。
 
 > 遮罩使用 **RGBA 而非灰度**：QML 侧用 `OpacityMask` 按 alpha 通道遮罩，
 > 灰度 PNG 会以 `alpha = 1` 载入，导致整个屏幕被前景覆盖。
@@ -463,8 +474,8 @@ $XDG_DATA_HOME/depthscape/cache/
 
 ```text
 depth   = BLAKE3(壁纸内容) - 模型指纹 - d<depth pipeline 版本> - i<推理尺寸>
-refined = depth - r<refine 版本>
-mask    = refined - v<mask pipeline 版本> - t<threshold> - f<feather>
+refined = depth - r<depth pipeline 版本>                              (.dsr)
+mask    = depth - v<mask pipeline 版本> - t<threshold> - f<feather>   (.png)
 ```
 
 两个关键点：
@@ -664,7 +675,7 @@ $XDG_DATA_HOME/depthscape/
 ├── models/depth-anything-v2-small/model.onnx
 ├── cache/depth/       *.dsc   模型输出，f32，推理分辨率
 ├── cache/refined/     *.dsr   精修深度，u16，精修分辨率
-├── cache/masks/       *.png   遮罩，RGBA，原分辨率
+├── cache/masks/       *.png   遮罩，RGBA，细化分辨率
 └── runtime/generate.lock
 ```
 
@@ -810,6 +821,40 @@ Mouse idle
 ```
 
 避免无意义的持续高刷新。
+
+### 实测（2026-09-20）
+
+`analyze` 已内建分阶段计时（输出 JSON 里的 `timings` 字段），
+所以下表可复现，不依赖 profiler。5120×2880 壁纸、模型已就绪、
+同一台机器取 5 次中位数（冷启动 3 次），含进程启动与 JSON 解析：
+
+| 场景 | 优化前 | 优化后 |
+|---|---|---|
+| 三级全命中（重复检查） | 112.2 ms | **3.1 ms** |
+| 遮罩未命中（拖滑块） | 236.9 ms | **14.9 ms** |
+| 精修 + 遮罩未命中 | 375.6 ms | 218.6 ms |
+| 全部未命中（冷启动） | 1023.5 ms | 893.3 ms |
+
+三处改动：
+
+1. **模型校验记忆化。** 原来每次调用都重新对 99 MB 的模型做 SHA-256，
+   约 40 ms ——比它保护的整条缓存命中路径还贵。改为在模型旁写一个
+   `.verified` 边车文件记录 `(size, mtime_ns, sha256)`，三元组不变就跳过哈希。
+   校验和仍是权威：任何改动或截断都会改变 size 或 mtime，从而强制重算。
+2. **壁纸延迟解码。** 原来为了拿宽高而整张解码，5K 壁纸要 ~60 ms，
+   连纯缓存命中也得付。改为只读文件头取宽高（`image_dimensions`），
+   只有真正需要像素的深度/精修两级才解码——而这两级在遮罩命中时根本不跑。
+3. **遮罩按细化分辨率输出。** 遮罩是精修深度场的逐点函数，不可能比它更清晰。
+   原来把它上采样回壁纸分辨率再编码：5K 壁纸下是深度场 **7.1 倍**的像素，
+   多出来的全是插值。现按细化分辨率（长边 1920）输出，
+   PNG 从 1.4 MB / 125 ms 降到 277 KB / 8 ms。QML 侧本来就用
+   `PreserveAspectCrop` 缩放到输出，且缩放由 GPU 完成。
+   该改动把 `MASK_PIPELINE_VERSION` 提到 2，旧遮罩自动失效重算。
+
+剩余成本几乎都在冷启动路径上，且是模型与算法本身：
+深度推理 ~668 ms、guided filter ~145 ms、解码 61 ms。
+运行期两行已经降到「一次进程调用」的固定开销量级：
+壁纸 BLAKE3 约 1 ms，进程启动与参数解析约 2 ms。
 
 ---
 
@@ -1097,8 +1142,9 @@ MultiEffect { source: wallpaperImage; maskEnabled: true; maskSource: maskImage }
 两种写法都只有 35 点正确，**28 点露出了本应被遮住的底色**。
 
 原因是 `layer.enabled: true` 作用在**不可见**的 `Image` 上时，
-不保证产生并及时更新 layer 纹理：遮罩是一张 5120×2880 的 PNG，
-解码需要时间，而 `visible: false` 的项不会重绘，纹理就停在过期状态。
+不保证产生并及时更新 layer 纹理：遮罩是一张 PNG（实测时为 5120×2880，
+现在按细化分辨率输出，见 §11），解码需要时间，而 `visible: false`
+的项不会重绘，纹理就停在过期状态。
 DMS 的 `BackdropBlur` 之所以没踩到这个坑，是因为它的 `maskSource` 是一个
 `Rectangle`（瞬时绘制，无异步加载），`source` 则来自 `ShaderEffectSource`。
 
@@ -1138,8 +1184,9 @@ OpacityMask { anchors.fill: parent; source: wallpaperImage; maskSource: maskImag
 
 > 另一条被否掉的路：让引擎直接输出「壁纸 RGB + 覆盖度 alpha」的成品 PNG，
 > QML 侧只剩一个 `Image`，可完全绕开遮罩。但同一张 5120×2880 的壁纸，
-> 成品 PNG 是 **27 MB**，而纯遮罩只有 **1.4 MB**（遮罩的 RGB 是纯白，压缩率极高）。
-> 且每次拖动滑块都要重新编码整张成品图，会把 251 ms 的响应拖垮。故不采用。
+> 成品 PNG 是 **27 MB**，而纯遮罩只有 **277 KB**（遮罩的 RGB 是纯白，
+> 压缩率极高）。且每次拖动滑块都要重新编码整张成品图，而遮罩路径实测只要
+> 8 ms。故不采用。
 
 ---
 
