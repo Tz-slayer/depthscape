@@ -98,12 +98,21 @@ tools/make-preview.py --wallpaper ~/Pictures/Wallpapers/some.png
 # Layer regression test against a real niri session
 tools/layer-stacking-test/setup.sh
 qs -p tools/layer-stacking-test
+
+# Time the four cache scenarios, with the per-stage breakdown
+cp -a ~/.local/share/depthscape /tmp/dsbench
+python3 tools/bench.py --wallpaper ~/Pictures/Wallpapers/some.png --data-dir /tmp/dsbench
 ```
 
 Run the layer harness after touching anything to do with stacking or mask
 compositing — it drives the real `DepthDaemon` and `DepthForeground` and judges
 the result from pixels. See
 [`tools/layer-stacking-test/README.md`](tools/layer-stacking-test/README.md).
+
+`tools/bench.py` needs a scratch copy of the data directory because it deletes
+cache entries to force the cold scenarios; it refuses to run against the live
+one. The measured baseline is in
+[`docs/depthscape.md`](docs/depthscape.md) §11.
 
 ## Status
 
