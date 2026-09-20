@@ -62,60 +62,6 @@ PluginSettings {
 
     StyledText {
         width: parent.width
-        text: "Parallax"
-        color: Theme.surfaceText
-        font.pixelSize: Theme.fontSizeLarge
-        font.weight: Font.Bold
-        topPadding: Theme.spacingL
-    }
-
-    ToggleSetting {
-        settingKey: "parallaxEnabled"
-        label: "Navigation parallax"
-        description: "Shift the scene as you change workspace or column, so the foreground moves further than the background"
-        defaultValue: true
-    }
-
-    SliderSetting {
-        settingKey: "parallaxVerticalStep"
-        label: "Vertical step"
-        description: "Travel per workspace change, as a fraction of the screen height"
-        defaultValue: 20
-        minimum: 0
-        maximum: 100
-        unit: "‰"
-    }
-
-    SliderSetting {
-        settingKey: "parallaxHorizontalStep"
-        label: "Horizontal step"
-        description: "Travel per column change, as a fraction of the screen width"
-        defaultValue: 15
-        minimum: 0
-        maximum: 100
-        unit: "‰"
-    }
-
-    SliderSetting {
-        settingKey: "parallaxBackgroundRatio"
-        label: "Background lag"
-        description: "How far the background moves relative to the foreground. Lower values exaggerate the depth"
-        defaultValue: 35
-        minimum: 0
-        maximum: 100
-        unit: "%"
-    }
-
-    StyledText {
-        width: parent.width
-        text: "Parallax needs a compositor that reports navigation position. On niri the plugin reads it from the shell's own service, so no extra process is started."
-        color: Theme.surfaceVariantText
-        font.pixelSize: Theme.fontSizeSmall
-        wrapMode: Text.WordWrap
-    }
-
-    StyledText {
-        width: parent.width
         text: "Model"
         color: Theme.surfaceText
         font.pixelSize: Theme.fontSizeLarge

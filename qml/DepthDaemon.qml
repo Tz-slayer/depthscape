@@ -22,11 +22,6 @@ PluginComponent {
     readonly property int thresholdPercent: pluginData.threshold ?? 30
     readonly property int featherPercent: pluginData.feather ?? 8
 
-    readonly property bool parallaxEnabled: pluginData.parallaxEnabled ?? true
-    readonly property int parallaxHorizontalStep: pluginData.parallaxHorizontalStep ?? 15
-    readonly property int parallaxVerticalStep: pluginData.parallaxVerticalStep ?? 20
-    readonly property int parallaxBackgroundRatio: pluginData.parallaxBackgroundRatio ?? 35
-
     readonly property real threshold: thresholdPercent / 100
     readonly property real feather: featherPercent / 100
 
@@ -455,44 +450,6 @@ PluginComponent {
             root.raiseForeground();
             return "foreground re-mapped";
         }
-
-        function parallax(): string {
-            // Reported as JSON so the layer-stacking harness can assert on it
-            // without a screenshot, and so a user can check the plumbing with
-            // `qs ipc -i <id> call depthscape parallax`.
-            return JSON.stringify({
-                "enabled": root.parallaxEnabled,
-                "ready": parallax.ready,
-                "trackedOutput": parallax.outputName,
-                "foregroundX": Math.round(parallax.foregroundX * 100) / 100,
-                "foregroundY": Math.round(parallax.foregroundY * 100) / 100,
-                "backgroundX": Math.round(parallax.backgroundX * 100) / 100,
-                "backgroundY": Math.round(parallax.backgroundY * 100) / 100
-            });
-        }
-
-        // Measurement hook, not a user-facing action. Lets a screenshot test
-        // displace the layers while the desktop holds still; see the note on
-        // DepthParallax.debugSetOffset.
-        //
-        // Takes no arguments on purpose: Quickshell's IpcHandler dispatches
-        // parameterless functions reliably, and a measurement hook that has to
-        // be discovered by trial and error is worse than one with a fixed
-        // displacement. The pair below covers both axes.
-        function shiftParallaxVertical(): string {
-            parallax.debugSetOffset(0, 90);
-            return "parallax offset 0,90";
-        }
-
-        function shiftParallaxHorizontal(): string {
-            parallax.debugSetOffset(120, 0);
-            return "parallax offset 120,0";
-        }
-
-        function clearParallaxOffset(): string {
-            parallax.debugSetOffset(0, 0);
-            return "parallax offset 0,0";
-        }
     }
 
     Connections {
@@ -533,43 +490,6 @@ PluginComponent {
         }
     }
 
-    // DepthParallax reports which output the navigation belongs to; only that
-    // surface is offset. Everything else stays aligned with the compositor's
-    // own wallpaper, which is what keeps a multi-output desktop coherent.
-    readonly property var trackerScreen: parallax.trackedScreen
-
-    // Navigation-driven parallax. Kept as a single tracker rather than one per
-    // output: niri has one focus, so a single navigation action produces a
-    // single scene movement, and every output should agree on it. The tracker
-    // derives its step size from the output it is tracking, so the offsets it
-    // reports are already in the right pixel scale for that output.
-    DepthParallax {
-        id: parallax
-
-        enabled: root.effectEnabled && root.parallaxEnabled
-        horizontalStep: root.parallaxHorizontalStep / 1000
-        verticalStep: root.parallaxVerticalStep / 1000
-        backgroundRatio: root.parallaxBackgroundRatio / 100
-    }
-
-    // The scene must start centred. Restoring a session makes niri jump between
-    // workspaces while the shell is still coming up, and every one of those
-    // jumps looks exactly like the user navigating -- by the time the first
-    // frame is on screen the wallpaper can already be offset by a quarter of
-    // the travel budget. Nothing distinguishes the two cases from the outside,
-    // so the offsets are simply zeroed once the burst is over; from then on any
-    // change is a real navigation.
-    //
-    // The delay matches the raise safety net: both answer "has the shell
-    // finished rearranging itself", and splitting them would only add a second
-    // number to keep in sync.
-    Timer {
-        interval: 3000
-        running: true
-        repeat: false
-        onTriggered: parallax.reset()
-    }
-
     // One foreground surface per output. Placed here rather than in a desktop
     // surface because the framework wraps desktop widgets in its own container;
     // the layer we need is a full-screen, click-through overlay, which only a
@@ -593,19 +513,6 @@ PluginComponent {
                     targetScreen: modelData
                     wallpaperPath: root.effectEnabled ? root.wallpaperFor(modelData.name) : ""
                     maskPath: root.effectEnabled ? root.maskPathFor(modelData.name) : ""
-
-                    // Only the tracked output moves. On a multi-output desktop
-                    // the others stay put, which is correct: the user navigated
-                    // one screen, and shifting the others would be noise.
-                    backgroundX: modelData === trackerScreen ? parallax.backgroundX : 0
-                    backgroundY: modelData === trackerScreen ? parallax.backgroundY : 0
-                    foregroundX: modelData === trackerScreen ? parallax.foregroundX : 0
-                    foregroundY: modelData === trackerScreen ? parallax.foregroundY : 0
-
-                    // The spare area a layer must carry. Taken from the tracker
-                    // rather than recomputed here so the two cannot disagree.
-                    reserveX: modelData === trackerScreen ? parallax.maxOffsetX : 0
-                    reserveY: modelData === trackerScreen ? parallax.maxOffsetY : 0
                 }
             }
         }
