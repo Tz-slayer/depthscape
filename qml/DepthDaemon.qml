@@ -7,7 +7,7 @@ import qs.Services
 import qs.Modules.Plugins
 
 // Watches the wallpaper on every output, drives the Rust engine, and exposes
-// the resulting masks to the rest of the plugin.
+// the resulting images to the rest of the plugin.
 //
 // The engine is a one-shot process: one invocation analyses one wallpaper and
 // prints one JSON object. Jobs are serialised here rather than in the engine,
@@ -20,29 +20,16 @@ PluginComponent {
 
     readonly property bool effectEnabled: pluginData.effectEnabled ?? true
     readonly property bool autoGenerate: pluginData.autoGenerate ?? true
+    readonly property bool widgetsEnabled: pluginData.widgetsEnabled ?? true
     readonly property int thresholdPercent: pluginData.threshold ?? 30
     readonly property int featherPercent: pluginData.feather ?? 8
-
-    // Which layer-shell layer the foreground surface is mapped on.
-    //
-    // `background` (the default) is what makes the niri overview behave: niri
-    // only treats a layer surface as part of the backdrop — the area shared by
-    // every workspace card — when it is on `background`. On `bottom` the
-    // compositor reproduces the surface inside each workspace card instead, so
-    // the cut-out appears once per workspace rather than once overall.
-    //
-    // The trade-off is fixed by wlr-layer-shell: a background surface can never
-    // draw above anything on `bottom`, and DMS maps desktop widgets on `bottom`
-    // (DesktopPluginWrapper.qml). So with this on, desktop widgets sit *above*
-    // the foreground and are not occluded by it. `bottom` restores the old
-    // behaviour — widgets get covered, at the cost of the per-card duplication.
-    readonly property bool backgroundLayer: pluginData.backgroundLayer ?? true
 
     readonly property real threshold: thresholdPercent / 100
     readonly property real feather: featherPercent / 100
 
-    // Changing either parameter invalidates the mask but not the depth map, so
-    // this key is what decides whether a finished job is still worth applying.
+    // Changing either parameter invalidates the image pair but not the depth
+    // map, so this key is what decides whether a finished job is still worth
+    // applying.
     readonly property string parametersKey: threshold.toFixed(4) + ":" + feather.toFixed(4)
 
     // ------------------------------------------------------------------ engine
@@ -54,15 +41,31 @@ PluginComponent {
     property bool modelReady: false
     property bool modelBusy: false
 
+    // ------------------------------------------------------------------ layout
+
+    /// Where the widget host reads its layout from.
+    ///
+    /// A separate file from DMS's plugin data on purpose — see DepthWidgetHost.
+    /// The root is whatever `$DEPTHSCAPE_DATA_DIR` / `$XDG_DATA_HOME` resolve to,
+    /// which the engine also uses, so the two stay in step without either having
+    /// to tell the other where it is.
+    property string dataRoot: ""
+    readonly property string layoutPath: dataRoot === "" ? "" : dataRoot + "/widgets.json"
+
     // ----------------------------------------------------------------- outputs
 
-    // screenName -> { wallpaper, state, maskPath, message, elapsedMs }
+    // screenName -> { wallpaper, state, foregroundPath, backgroundPath,
+    //                 message, elapsedMs, cacheHit }
     // state: empty | pending | processing | ready | error
     property var outputs: ({})
     property var queue: []
     property var active: null
     property string lastStdout: ""
     property string lastStderr: ""
+
+    // One entry per output, holding the three surface windows for that output.
+    // The delegates register themselves; see the composition section below.
+    property var surfaceGroups: []
 
     // ------------------------------------------------------------------ helpers
 
@@ -71,14 +74,21 @@ PluginComponent {
         if (!path || path.length === 0)
             return "";
         // DMS stores solid-colour wallpapers as "#rrggbb" in the same field.
+        // There is nothing to analyse, and the user is presumably relying on
+        // that flat colour as their background.
         if (path.charAt(0) !== "/")
             return "";
         return path;
     }
 
-    function maskPathFor(screenName) {
+    function foregroundFor(screenName) {
         const row = outputs[screenName];
-        return row && row.state === "ready" ? row.maskPath : "";
+        return row && row.state === "ready" ? row.foregroundPath : "";
+    }
+
+    function backgroundFor(screenName) {
+        const row = outputs[screenName];
+        return row && row.state === "ready" ? row.backgroundPath : "";
     }
 
     function patchRow(screenName, patch) {
@@ -208,7 +218,7 @@ PluginComponent {
         const stale = job.parametersKey !== parametersKey || currentWallpaper !== job.wallpaper;
         if (stale) {
             // The result describes a wallpaper or a parameter set that no longer
-            // applies. Drop it rather than flashing a stale mask on screen.
+            // applies. Drop it rather than flashing a stale pair on screen.
             if (currentWallpaper)
                 enqueue(job.screenName);
             pump();
@@ -216,7 +226,12 @@ PluginComponent {
         }
 
         if (exitCode !== 0) {
-            patchRow(job.screenName, { "state": "error", "maskPath": "", "message": shortError() });
+            patchRow(job.screenName, {
+                "state": "error",
+                "foregroundPath": "",
+                "backgroundPath": "",
+                "message": shortError()
+            });
             pump();
             return;
         }
@@ -227,19 +242,24 @@ PluginComponent {
         } catch (error) {
             parsed = null;
         }
-        if (!parsed || typeof parsed.maskPath !== "string" || parsed.maskPath === "") {
+        const valid = parsed
+            && typeof parsed.foregroundPath === "string" && parsed.foregroundPath !== ""
+            && typeof parsed.backgroundPath === "string" && parsed.backgroundPath !== "";
+        if (!valid) {
             patchRow(job.screenName, {
                 "state": "error",
-                "maskPath": "",
+                "foregroundPath": "",
+                "backgroundPath": "",
                 "message": I18n.tr("The depth engine returned an unexpected result.")
             });
         } else {
             patchRow(job.screenName, {
                 "state": "ready",
-                "maskPath": parsed.maskPath,
+                "foregroundPath": parsed.foregroundPath,
+                "backgroundPath": parsed.backgroundPath,
                 "message": "",
                 "elapsedMs": parsed.elapsedMs || 0,
-                "cacheHit": parsed.maskCacheHit === true
+                "cacheHit": parsed.splitCacheHit === true
             });
         }
         pump();
@@ -261,7 +281,8 @@ PluginComponent {
             }
             if (row.wallpaper !== wallpaper) {
                 row.wallpaper = wallpaper;
-                row.maskPath = "";
+                row.foregroundPath = "";
+                row.backgroundPath = "";
                 row.message = "";
                 row.elapsedMs = 0;
                 row.cacheHit = false;
@@ -278,7 +299,7 @@ PluginComponent {
     }
 
     function syncParameters() {
-        // A parameter change invalidates every mask; drop them and rebuild.
+        // A parameter change invalidates every pair; drop them and rebuild.
         const next = {};
         for (const name in outputs) {
             const row = {};
@@ -286,7 +307,8 @@ PluginComponent {
                 row[key] = outputs[name][key];
             if (row.wallpaper) {
                 row.state = "pending";
-                row.maskPath = "";
+                row.foregroundPath = "";
+                row.backgroundPath = "";
             }
             next[name] = row;
         }
@@ -322,6 +344,26 @@ PluginComponent {
                     root.engineProblem = I18n.tr("Build the engine with `cargo build --release` in the engine/ directory.");
                     root.publish();
                 }
+            }
+        }
+    }
+
+    // The engine reports its own data directory, which is where widgets.json
+    // lives. Asking the engine rather than duplicating the `$DEPTHSCAPE_DATA_DIR`
+    // / `$XDG_DATA_HOME` resolution here keeps one definition of "our data
+    // directory" instead of two that can disagree.
+    Process {
+        id: resolveDataRoot
+
+        running: true
+        command: ["sh", "-c", 'if [ -n "$DEPTHSCAPE_DATA_DIR" ]; then echo "$DEPTHSCAPE_DATA_DIR"; ' +
+            'elif [ -n "$XDG_DATA_HOME" ]; then echo "$XDG_DATA_HOME/depthscape"; ' +
+            'else echo "$HOME/.local/share/depthscape"; fi']
+        stdout: StdioCollector {
+            onStreamFinished: {
+                const found = text.trim();
+                if (found.length > 0)
+                    root.dataRoot = found;
             }
         }
     }
@@ -378,6 +420,69 @@ PluginComponent {
         }
     }
 
+    Process {
+        id: cacheProcess
+
+        command: []
+        onExited: exitCode => {
+            if (exitCode !== 0) {
+                root.engineProblem = root.shortError();
+                root.publish();
+                return;
+            }
+            root.syncOutputs();
+        }
+        stderr: StdioCollector {
+            onStreamFinished: root.lastStderr = text
+        }
+    }
+
+    // ------------------------------------------------------------------ overview
+
+    // Overview state comes from the compositor rather than from `NiriService`.
+    //
+    // `NiriService.inOverview` is the natural source — DMS's own wallpaper uses
+    // it — but a plugin's daemon does not get a usable NiriService: the service
+    // tree a plugin sees is reduced, and the property reads as a constant false
+    // rather than failing loudly. Polling `niri msg` is cheap by comparison: one
+    // short-lived process every few hundred milliseconds, and none at all once
+    // the state stops changing in a way anyone can see.
+    //
+    // What the overview does with each surface:
+    //
+    //   * The background stays mapped and blurs itself, matching DMS's own
+    //     wallpaper treatment so the overview looks untouched.
+    //   * The widgets and the foreground are hidden. A surface on the
+    //     `background` layer that is not in the backdrop is reproduced inside
+    //     every workspace card, so leaving them up would duplicate our clock
+    //     into each card — and the user's requirement is only that the person
+    //     need not appear.
+    //
+    // This avoids `place-within-backdrop` entirely, which parks a surface
+    // underneath DMS's wallpaper and its blur and therefore makes it invisible.
+    property bool inOverview: false
+
+    Process {
+        id: overviewProbe
+
+        running: true
+        command: ["niri", "msg", "overview-state"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                const value = text.indexOf("open") !== -1 && text.indexOf("closed") === -1;
+                if (value !== root.inOverview)
+                    root.inOverview = value;
+            }
+        }
+    }
+
+    Timer {
+        interval: 350
+        running: true
+        repeat: true
+        onTriggered: if (!overviewProbe.running) overviewProbe.running = true
+    }
+
     // ------------------------------------------------------------------ lifecycle
 
     function checkModel() {
@@ -402,13 +507,67 @@ PluginComponent {
         if (enginePath === "")
             return;
         for (const name in outputs)
-            patchRow(name, { "state": "pending", "maskPath": "", "message": "" });
+            patchRow(name, { "state": "pending", "foregroundPath": "", "backgroundPath": "", "message": "" });
         queue = [];
         cacheProcess.command = [enginePath, "clear-cache"];
         cacheProcess.running = true;
     }
 
-    // The settings page and the desktop widget cannot call into this daemon
+    /// Write a starter widgets.json if there is not one already.
+    ///
+    /// Electron-free and dependency-free on purpose: this is one small write, and
+    /// pulling in a process for it would be more code than the thing it does. The
+    /// position is centred horizontally and placed a third of the way down, which
+    /// is where a clock reads best against a landscape wallpaper.
+    function writeExampleLayout() {
+        if (dataRoot === "") {
+            engineProblem = I18n.tr("The plugin data directory could not be resolved.");
+            publish();
+            return;
+        }
+        const directory = dataRoot;
+        const example = {
+            "widgets": [
+                {
+                    "id": "clock",
+                    "type": "clock",
+                    "x": 1100,
+                    "y": 850,
+                    "settings": {
+                        "showSeconds": false,
+                        "showDate": true
+                    }
+                }
+            ]
+        };
+        layoutWriter.command = [
+            "sh", "-c",
+            'mkdir -p "$1" && [ -f "$1/widgets.json" ] || ' +
+            'printf %s "$2" > "$1/widgets.json"',
+            "sh", directory, JSON.stringify(example, null, 2)
+        ];
+        layoutWriter.running = true;
+    }
+
+    Process {
+        id: layoutWriter
+
+        command: []
+        onExited: exitCode => {
+            if (exitCode !== 0) {
+                root.engineProblem = I18n.tr("Could not write the example layout.");
+                root.publish();
+                return;
+            }
+            // The host watches the file, so nothing else has to be told.
+            console.info("Depthscape: wrote " + root.layoutPath);
+        }
+        stderr: StdioCollector {
+            onStreamFinished: root.lastStderr = text
+        }
+    }
+
+    // The settings page and the status widget cannot call into this daemon
     // directly, so actions travel through plugin data. Consume the key and
     // clear it so it is never replayed on the next shell start.
     function consumeAction() {
@@ -424,24 +583,9 @@ PluginComponent {
             enqueueAll();
         else if (action === "clearCache")
             clearCache();
+        else if (action === "exampleLayout")
+            writeExampleLayout();
         return true;
-    }
-
-    Process {
-        id: cacheProcess
-
-        command: []
-        onExited: exitCode => {
-            if (exitCode !== 0) {
-                root.engineProblem = root.shortError();
-                root.publish();
-                return;
-            }
-            root.syncOutputs();
-        }
-        stderr: StdioCollector {
-            onStreamFinished: root.lastStderr = text
-        }
     }
 
     IpcHandler {
@@ -462,9 +606,25 @@ PluginComponent {
             return "clearing cache";
         }
 
-        function raise(): string {
-            root.raiseForeground();
-            return "foreground re-mapped";
+        function debug(): string {
+            const screens = {};
+            for (const screen of Quickshell.screens) {
+                screens[screen.name] = {
+                    "wallpaper": root.wallpaperFor(screen.name),
+                    "foreground": root.foregroundFor(screen.name),
+                    "background": root.backgroundFor(screen.name)
+                };
+            }
+            return JSON.stringify({
+                "effectEnabled": root.effectEnabled,
+                "widgetsEnabled": root.widgetsEnabled,
+                "modelReady": root.modelReady,
+                "enginePath": root.enginePath,
+                "dataRoot": root.dataRoot,
+                "layoutPath": root.layoutPath,
+                "inOverview": root.inOverview,
+                "screens": screens
+            });
         }
     }
 
@@ -491,7 +651,7 @@ PluginComponent {
             if (changedId !== root.pluginId)
                 return;
             // A pending action is not a settings change: dispatching one must
-            // not also invalidate every cached mask.
+            // not also invalidate every cached pair.
             if (root.consumeAction())
                 return;
             root.syncParameters();
@@ -506,103 +666,183 @@ PluginComponent {
         }
     }
 
-    // One foreground surface per output. Placed here rather than in a desktop
-    // surface because the framework wraps desktop widgets in its own container;
-    // the layer we need is a full-screen, click-through overlay, which only a
-    // self-created PanelWindow can provide.
+    // ------------------------------------------------------- surface composition
     //
-    // The Loader exists so the surfaces can be destroyed and re-created, which
-    // is the only way to change their position *within* a layer: layer surfaces
-    // stack by map order, and there is no "raise" request in wlr-layer-shell.
-    // That matters only on `bottom`, where we share the layer with the desktop
-    // widgets. See raiseForeground().
+    // Three full-screen surfaces on the `background` layer. Within a layer,
+    // surfaces stack by map order — the last one mapped is drawn on top — and
+    // wlr-layer-shell has no raise request, so map order is the only control.
+    //
+    // DECLARATION ORDER IS NOT MAP ORDER
+    //
+    // Measured: creating all three together in one component tree does not
+    // produce a reliable stack. QML realises each `PanelWindow` asynchronously as
+    // its Wayland object is created, so the compositor sees three maps in
+    // whatever order they happen to become ready — and with two screens the
+    // delegates interleave with each other as well. The symptom is the
+    // foreground rendering correctly but sitting *under* the background, so the
+    // subject is invisible and the screen shows only the filled background.
+    //
+    // The fix is to map them in sequence rather than at once: each surface is
+    // gated on a stage counter that advances one step per `stageTimer` tick, so
+    // the compositor is handed exactly one new window at a time and the stack
+    // follows the stage order deterministically. The 32ms tick is the same
+    // budget DMS uses for its own equivalent (DesktopWidgetLayer.qml
+    // `rebuildApply`).
+    //
+    // The `Loader` wrapping lets the whole group be destroyed and rebuilt, which
+    // is needed because DMS maps its own wallpaper asynchronously and can settle
+    // on top of a group that mapped earlier.
     Loader {
-        id: foregroundLoader
+        id: surfaceLoader
 
         active: true
         sourceComponent: Component {
             Variants {
                 model: Quickshell.screens
 
-                delegate: DepthForeground {
+                delegate: Item {
+                    id: surfaces
+
                     required property var modelData
 
-                    targetScreen: modelData
-                    layer: root.backgroundLayer ? WlrLayer.Background : WlrLayer.Bottom
-                    wallpaperPath: root.effectEnabled ? root.wallpaperFor(modelData.name) : ""
-                    maskPath: root.effectEnabled ? root.maskPathFor(modelData.name) : ""
+                    // Which surfaces of this output are mapped so far. 0 = none,
+                    // 3 = all. Advanced by `stageTimer`, one step at a time.
+                    property int stage: 0
+
+                    // The delegates have no stable id to address them by, and
+                    // `Variants` is a C++ type whose internals are not part of
+                    // its contract, so the group registers itself instead of
+                    // being searched for. Clearing the group first keeps a
+                    // rebuild from leaving stale entries behind.
+                    Component.onCompleted: {
+                        root.surfaceGroups.push(surfaces);
+                        stageTimer.start();
+                    }
+                    Component.onDestruction: {
+                        const at = root.surfaceGroups.indexOf(surfaces);
+                        if (at >= 0)
+                            root.surfaceGroups.splice(at, 1);
+                    }
+
+                    // Never show anything whose image is not ready yet: an empty
+                    // `background` layer surface in the overview produces an
+                    // empty card, and a visible-but-empty window still costs a
+                    // compositor surface.
+                    //
+                    // The background is the exception to the "hide in overview"
+                    // rule. Hiding it would leave the overview showing DMS's own
+                    // crisp wallpaper with our widgets floating over it; instead
+                    // it stays mapped and blurs itself with the same parameters
+                    // DMS uses, so the overview reads exactly as it would without
+                    // us. The widgets and the foreground do hide — a wallpaper is
+                    // one image on one screen, and duplicating our clock into
+                    // every workspace card (which is what staying mapped would
+                    // do) is the thing this architecture exists to avoid.
+                    readonly property bool wantForeground: root.effectEnabled
+                        && !root.inOverview
+                        && root.foregroundFor(modelData.name) !== ""
+                    readonly property bool wantBackground: root.effectEnabled
+                        && root.backgroundFor(modelData.name) !== ""
+                    readonly property bool wantWidgets: root.effectEnabled
+                        && root.widgetsEnabled
+                        && !root.inOverview
+
+                    // 1. Background — the scene with the subject cut out.
+                    DepthBackground {
+                        targetScreen: surfaces.modelData
+                        backgroundPath: surfaces.wantBackground
+                            ? root.backgroundFor(surfaces.modelData.name)
+                            : ""
+                        blurred: root.inOverview
+                        visible: surfaces.stage >= 1 && surfaces.wantBackground
+                    }
+
+                    // 2. Widgets — the clock the subject stands in front of.
+                    //
+                    // Created between the other two on purpose: the subject has
+                    // to occlude the clock, and the clock has to occlude the
+                    // background.
+                    DepthWidgetHost {
+                        targetScreen: surfaces.modelData
+                        layoutPath: root.layoutPath
+                        widgetsEnabled: surfaces.stage >= 2 && surfaces.wantWidgets
+                        visible: surfaces.stage >= 2 && surfaces.wantWidgets
+                    }
+
+                    // 3. Foreground — the subject, mapped last means on top.
+                    DepthForeground {
+                        targetScreen: surfaces.modelData
+                        foregroundPath: surfaces.wantForeground
+                            ? root.foregroundFor(surfaces.modelData.name)
+                            : ""
+                        visible: surfaces.stage >= 3 && surfaces.wantForeground
+                    }
                 }
             }
         }
     }
 
+    // Walks every output's group from stage 0 to 3, one surface per tick.
+    Timer {
+        id: stageTimer
+
+        interval: 32
+        repeat: true
+        onTriggered: {
+            let advanced = false;
+            for (const group of root.surfaceGroups) {
+                if (group.stage < 3) {
+                    group.stage += 1;
+                    advanced = true;
+                }
+            }
+            if (!advanced)
+                stageTimer.stop();
+        }
+    }
+
     // Re-mapping is not instantaneous: the compositor has to process the unmap
-    // before the new surface can claim the top of the layer. DMS waits 32ms in
+    // before the new surfaces can claim the top of the layer. DMS waits 32ms in
     // its own equivalent (DesktopWidgetLayer.qml `rebuildApply`); match that.
     Timer {
         id: remapTimer
 
         interval: 32
         repeat: false
-        onTriggered: foregroundLoader.active = true
+        onTriggered: {
+            surfaceLoader.active = true;
+            stageTimer.restart();
+        }
     }
 
-    function raiseForeground() {
-        // On `background` there is nothing to race against: widgets live on
-        // `bottom`, a strictly higher layer, so map order within our layer
-        // cannot put us behind them. Re-mapping would only cause a visible
-        // flicker for no gain, so skip it entirely.
-        if (root.backgroundLayer)
-            return;
-        foregroundLoader.active = false;
+    /// Tear down and rebuild every Depthscape surface.
+    ///
+    /// The only way to re-assert stacking within a layer: there is no raise
+    /// request in wlr-layer-shell, so a surface that has been mapped over has to
+    /// be unmapped and mapped again. Rebuilding resets every delegate to stage 0,
+    /// which re-runs the staged mapping described above.
+    function raiseSurfaces() {
+        surfaceLoader.active = false;
+        // The delegates remove themselves on destruction, but clearing here as
+        // well means a rebuild can never advance a stage on a half-dead group.
+        root.surfaceGroups = [];
         remapTimer.restart();
     }
 
-    // DMS rebuilds every desktop widget surface when the instance list changes,
-    // which leaves those surfaces mapped after ours and therefore in front.
-    // Wait out DMS's own debounce (150ms) plus its 32ms remap before answering,
-    // so our surfaces are the last ones mapped.
-    Timer {
-        id: widgetRebuildTimer
-
-        interval: 400
-        repeat: false
-        onTriggered: root.raiseForeground()
-    }
-
-    Connections {
-        target: SettingsData
-
-        function onDesktopWidgetInstancesChanged() {
-            widgetRebuildTimer.restart();
-        }
-    }
-
-    // The instance list is not the only thing that makes DMS rebuild its
-    // desktop widget surfaces. `DesktopWidgetLayer` also rebuilds once a
-    // plugin's desktop component finishes loading (`pluginReadyKey`, which is
-    // derived from `PluginService.pluginDesktopComponents`). At shell startup
-    // that happens *after* we map the foreground, so the widgets end up in
-    // front of us until something else triggers a raise. Observe the same
-    // property DMS does.
-    Connections {
-        target: PluginService
-
-        function onPluginDesktopComponentsChanged() {
-            widgetRebuildTimer.restart();
-        }
-    }
-
-    // Startup safety net. The signal above can fire before this daemon is
-    // constructed, and a cold engine means the first mask can land after it
-    // too. One delayed re-assert covers both orderings: if the foreground is
-    // not mapped yet the call is a no-op, and the surface maps last (therefore
-    // on top) whenever the mask does arrive.
+    // DMS maps its wallpaper asynchronously, so on a cold start it can settle on
+    // top of a group that mapped earlier. Re-creating our surfaces after it has
+    // had time to land puts us above it again.
+    //
+    // 3000ms is a bound, not a synchronisation: DMS's own sequence is an image
+    // load followed by a few settle frames, and a 5K wallpaper has been measured
+    // at ~900ms end to end on this machine. The cost of being late is a brief
+    // flash of DMS's wallpaper at startup; the cost of being early is the effect
+    // never appearing at all, which is much worse.
     Timer {
         interval: 3000
         running: true
         repeat: false
-        onTriggered: root.raiseForeground()
+        onTriggered: root.raiseSurfaces()
     }
 
     Component.onCompleted: {

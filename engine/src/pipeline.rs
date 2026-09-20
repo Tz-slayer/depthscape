@@ -1,8 +1,9 @@
-//! The end-to-end analysis pipeline: wallpaper in, occlusion mask out.
+//! The end-to-end analysis pipeline: wallpaper in, a foreground/background pair out.
 
 use crate::cache::{self, CacheEntry};
 use crate::config::{
-    Paths, GUIDED_FILTER_EPSILON, GUIDED_FILTER_RADIUS, REFINEMENT_MAX_DIMENSION,
+    Paths, FILL_BLUR_FRACTION, FILL_BLUR_PASSES, FILL_DILATE_PIXELS,
+    GUIDED_FILTER_EPSILON, GUIDED_FILTER_RADIUS, REFINEMENT_MAX_DIMENSION,
 };
 use crate::depth::DepthModel;
 use crate::imageops;
@@ -27,21 +28,23 @@ pub struct AnalyzeRequest {
 
 #[derive(Debug, Clone)]
 pub struct AnalyzeOutcome {
-    pub mask_path: PathBuf,
+    pub foreground_path: PathBuf,
+    pub background_path: PathBuf,
     pub wallpaper_path: PathBuf,
     /// Wallpaper dimensions.
     pub width: u32,
     pub height: u32,
-    /// Mask dimensions. Never larger than the wallpaper; smaller whenever the
-    /// depth field is, which is the usual case for a high-resolution wallpaper.
-    pub mask_width: u32,
-    pub mask_height: u32,
-    /// Whether each cache tier already held a usable artefact. A mask hit
+    /// Dimensions of the emitted pair. Never larger than the wallpaper; smaller
+    /// whenever the depth field is, which is the usual case for a high-resolution
+    /// wallpaper.
+    pub output_width: u32,
+    pub output_height: u32,
+    /// Whether each cache tier already held a usable artefact. A split hit
     /// short-circuits the pipeline, so the other two report what the cache
     /// holds rather than what this run read.
     pub depth_cache_hit: bool,
     pub refined_cache_hit: bool,
-    pub mask_cache_hit: bool,
+    pub split_cache_hit: bool,
     pub elapsed_ms: u128,
     pub timings: Timings,
 }
@@ -63,8 +66,8 @@ pub struct Timings {
     pub depth_ms: u128,
     /// Refined tier: cache read, or guided filter + cache write.
     pub refine_ms: u128,
-    /// Mask tier: threshold, PNG encode, cache write.
-    pub mask_ms: u128,
+    /// Split tier: fill, composite, PNG encode, cache writes.
+    pub split_ms: u128,
     /// Pruning the caches down to their retention limits.
     pub prune_ms: u128,
 }
@@ -132,22 +135,21 @@ pub fn analyze(paths: &Paths, request: &AnalyzeRequest) -> Result<AnalyzeOutcome
     timings.decode_ms = stage.elapsed().as_millis();
 
     let (model_width, model_height) = imageops::inference_size(source_width, source_height);
-    let (refinement_width, refinement_height) = refinement_size(source_width, source_height);
-    let (mask_width, mask_height) = mask_size(source_width, source_height);
+    let (output_width, output_height) = refinement_size(source_width, source_height);
 
     // --- the common case --------------------------------------------------
-    // A cached mask is the entire answer. Nothing below reads the depth field
+    // A cached pair is the entire answer. Nothing below reads the depth field
     // or decodes the wallpaper, so a hit costs one header read, one BLAKE3 of
-    // the wallpaper, and a stat.
-    let mask_cache_hit = entry.mask_path.is_file();
+    // the wallpaper, and two stats.
+    let split_cache_hit = entry.split_is_cached();
     let mut source_rgb: Option<RgbImage> = None;
     // Reported from what the cache holds rather than from what this run
-    // happened to read: on a mask hit the other tiers are never consulted, and
+    // happened to read: on a split hit the other tiers are never consulted, and
     // `false` would read as "missed".
     let mut depth_cache_hit = entry.depth_path.is_file();
     let mut refined_cache_hit = entry.refined_path.is_file();
 
-    if !mask_cache_hit {
+    if !split_cache_hit {
         // --- depth tier ---------------------------------------------------
         // A lazy decode is charged to `decode_ms`, not to the tier that
         // happened to need it, so the stages stay mutually exclusive.
@@ -185,7 +187,7 @@ pub fn analyze(paths: &Paths, request: &AnalyzeRequest) -> Result<AnalyzeOutcome
         let decoded_before = timings.decode_ms;
         let stage = Instant::now();
         let (refined, hit) = match fs::read(&entry.refined_path).ok().and_then(|bytes| {
-            cache::decode_refined(&bytes, refinement_width, refinement_height).ok()
+            cache::decode_refined(&bytes, output_width, output_height).ok()
         }) {
             Some(cached) => (cached, true),
             None => {
@@ -194,12 +196,12 @@ pub fn analyze(paths: &Paths, request: &AnalyzeRequest) -> Result<AnalyzeOutcome
                     &depth,
                     model_width,
                     model_height,
-                    refinement_width,
-                    refinement_height,
+                    output_width,
+                    output_height,
                 )?;
                 cache::atomic_write(
                     &entry.refined_path,
-                    &cache::encode_refined(refinement_width, refinement_height, &computed),
+                    &cache::encode_refined(output_width, output_height, &computed),
                 )?;
                 (computed, false)
             }
@@ -207,15 +209,35 @@ pub fn analyze(paths: &Paths, request: &AnalyzeRequest) -> Result<AnalyzeOutcome
         refined_cache_hit = hit;
         timings.refine_ms = stage.elapsed().as_millis() - (timings.decode_ms - decoded_before);
 
-        // --- mask tier ----------------------------------------------------
-        // Straight from the refined field: it already carries every bit of
-        // detail the mask can express, so there is nothing to upsample.
+        // --- split tier ---------------------------------------------------
+        // The only stage that reads wallpaper pixels at the output resolution,
+        // and therefore the only one that pays for the full decode.
+        let decoded_before = timings.decode_ms;
         let stage = Instant::now();
+        let source = ensure_source(&mut source_rgb, &mut timings, &request.wallpaper)?;
+        let resized = if (source.width(), source.height()) == (output_width, output_height) {
+            source.clone()
+        } else {
+            image::imageops::resize(
+                source,
+                output_width,
+                output_height,
+                image::imageops::FilterType::Lanczos3,
+            )
+        };
         let alpha =
             imageops::foreground_alpha(&refined, threshold, feather, crate::depth::NEAR_IS_HIGH);
-        let buffer = encode_mask_png(mask_width, mask_height, &imageops::alpha_to_u8(&alpha))?;
-        cache::atomic_write(&entry.mask_path, &buffer)?;
-        timings.mask_ms = stage.elapsed().as_millis();
+        let (foreground, background) = split_at_resolution(&resized, &alpha);
+        cache::atomic_write(
+            &entry.foreground_path,
+            &encode_foreground_png(output_width, output_height, &foreground)?,
+        )?;
+        cache::atomic_write(
+            &entry.background_path,
+            &encode_background_png(output_width, output_height, &background)?,
+        )?;
+        timings.split_ms =
+            stage.elapsed().as_millis() - (timings.decode_ms - decoded_before);
     }
 
     let stage = Instant::now();
@@ -223,50 +245,167 @@ pub fn analyze(paths: &Paths, request: &AnalyzeRequest) -> Result<AnalyzeOutcome
     timings.prune_ms = stage.elapsed().as_millis();
 
     Ok(AnalyzeOutcome {
-        mask_path: entry.mask_path,
+        foreground_path: entry.foreground_path,
+        background_path: entry.background_path,
         wallpaper_path: request.wallpaper.clone(),
         width: source_width,
         height: source_height,
-        mask_width,
-        mask_height,
+        output_width,
+        output_height,
         depth_cache_hit,
         refined_cache_hit,
-        mask_cache_hit,
+        split_cache_hit,
         elapsed_ms: started.elapsed().as_millis(),
         timings,
     })
 }
 
-/// Encode an 8-bit mask as a PNG whose **alpha channel** carries the coverage.
+/// Split an RGB image into an RGBA foreground and a filled-in RGB background.
 ///
-/// Emitted as RGBA rather than greyscale on purpose: the QML side masks the
-/// foreground layer with MultiEffect, which reads the alpha channel. A
-/// greyscale PNG arrives with alpha = 1 everywhere and would occlude the entire
-/// screen. RGB is set to white so the file reads correctly as an overlay.
-fn encode_mask_png(width: u32, height: u32, alpha: &[u8]) -> Result<Vec<u8>> {
-    if alpha.len() != width as usize * height as usize {
+/// The two outputs are complementary by construction: for every pixel,
+/// `alpha * foreground + (1 - alpha) * background` reconstructs the original
+/// image exactly, up to the fill's own approximation error inside the cut-out
+/// region. That identity is what makes the pair safe to draw on separate layer
+/// surfaces — any error in `alpha` shows up as a seam where the two layers meet,
+/// but the composite is self-consistent everywhere else.
+///
+/// STRAIGHT ALPHA, NOT PREMULTIPLIED
+///
+/// The foreground carries the subject's own colour unchanged, with coverage in
+/// the alpha channel. It is deliberately *not* premultiplied, even though that is
+/// the more common interchange convention, because the consumer is QML's `Image`
+/// and that samples a straight-alpha source and multiplies by alpha itself.
+///
+/// Measured: emitting premultiplied data makes QML apply the alpha twice, so the
+/// subject renders washed out and semi-transparent — the clock behind it stays
+/// visible through the silhouette instead of being occluded.
+///
+/// THE BACKGROUND IS FORCED, NOT CHOSEN
+///
+/// Straight alpha fixes the background almost everywhere. Solving the identity
+/// above for `C_bg` with `C_fg == C_src` gives `C_bg == C_src` for every
+/// `alpha < 1`. Only where `alpha == 1` is the equation degenerate — the
+/// foreground covers completely, so any background value works. That sliver of
+/// freedom is the entire point of the split: the blurred fill hides *under* the
+/// opaque part of the subject.
+///
+/// So the fill is mixed in with a hard step at full coverage, never with the
+/// soft alpha. Mixing softly reintroduces the subject into the background all
+/// along the feathered rim, and the composite then adds the subject to itself —
+/// measured at 37/255 of drift at half coverage, which reads as a bright halo
+/// tracing the silhouette.
+///
+/// The background is deliberately *not* `source * (1 - alpha)`: that would leave
+/// the background layer transparent wherever the subject is, so the desktop below
+/// would show through and the effect would read as a hole punched in the screen.
+/// Replacing the subject's region with a blurred estimate keeps the background
+/// layer fully opaque, so a modest parallax offset never exposes a blank edge.
+pub fn split_at_resolution(source: &RgbImage, alpha: &[f32]) -> (Vec<u8>, Vec<u8>) {
+    let (width, height) = (source.width(), source.height());
+    let count = (width as usize) * (height as usize);
+    debug_assert_eq!(alpha.len(), count, "alpha must match the image");
+
+    // --- the fill ---------------------------------------------------------
+    // Blur before masking, not after: the region to be replaced has to be
+    // sourced from pixels that are *not* the subject, so the subject is cut out
+    // first and the hole is closed by blurring across it from its surroundings.
+    let coverage = imageops::dilate(alpha, width, height, FILL_DILATE_PIXELS);
+    let blur_radius = ((width.min(height) as f32 * FILL_BLUR_FRACTION).round() as u32).max(1);
+    let blurred = imageops::box_blur_rgb(source.as_raw(), width, height, blur_radius, FILL_BLUR_PASSES);
+
+    let mut foreground = Vec::with_capacity(count * 4);
+    let mut background = Vec::with_capacity(count * 3);
+
+    for index in 0..count {
+        let pixel = &source.as_raw()[index * 3..index * 3 + 3];
+        let value = alpha[index].clamp(0.0, 1.0);
+        // The fill uses the dilated coverage, so it stays clear of the soft
+        // edge where alpha is neither 0 nor 1.
+        let filled = coverage[index].clamp(0.0, 1.0);
+
+        // Straight alpha: the subject's colour is stored verbatim and the
+        // coverage travels alongside it. See the note above — premultiplying
+        // here would be applied a second time by the consumer.
+        foreground.extend_from_slice(pixel);
+        foreground.push((value * 255.0).round().clamp(0.0, 255.0) as u8);
+
+        // The background's value is forced wherever the composite has to hold:
+        //
+        //     alpha * C_fg + (1 - alpha) * C_bg = C_src   and   C_fg = C_src
+        //     =>  C_bg = C_src    for every alpha < 1
+        //
+        // At alpha == 1 the equation is degenerate — the foreground covers
+        // completely, so any background value works. That freedom is the entire
+        // point of splitting the image: the blurred fill hides *under* the
+        // opaque part of the subject.
+        //
+        // Hence the fill is mixed in with a hard step at full coverage, never
+        // with the soft alpha. Mixing softly (by `alpha` itself) reintroduces
+        // the subject into the background all along the feathered rim, and the
+        // composite then adds the subject to itself — measured at 37/255 of
+        // drift at half coverage, which reads as a bright halo tracing the
+        // silhouette.
+        let covered = f32::from(filled >= 1.0);
+        for channel in 0..3 {
+            let source_value = pixel[channel] as f32;
+            let blurred_value = blurred[index * 3 + channel] as f32;
+            background.push(
+                (source_value * (1.0 - covered) + blurred_value * covered)
+                    .round()
+                    .clamp(0.0, 255.0) as u8,
+            );
+        }
+    }
+
+    (foreground, background)
+}
+
+/// Encode the foreground as straight-alpha RGBA PNG.
+fn encode_foreground_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
+    if rgba.len() != width as usize * height as usize * 4 {
         bail!(
-            "mask buffer holds {} samples, expected {width}x{height}",
-            alpha.len()
+            "foreground buffer holds {} samples, expected {width}x{height}x4",
+            rgba.len()
         );
     }
-    let mut rgba = Vec::with_capacity(alpha.len() * 4);
-    for value in alpha {
-        rgba.extend_from_slice(&[255, 255, 255, *value]);
+    let image =
+        RgbaImage::from_raw(width, height, rgba.to_vec()).context("cannot build the foreground")?;
+    encode_png(DynamicImage::ImageRgba8(image))
+}
+
+/// Encode the filled-in background as RGB PNG.
+///
+/// RGB rather than RGBA on purpose: the background layer is fully opaque by
+/// construction, and dropping the alpha channel saves a quarter of the bytes on
+/// the larger of the two files.
+fn encode_background_png(width: u32, height: u32, rgb: &[u8]) -> Result<Vec<u8>> {
+    if rgb.len() != width as usize * height as usize * 3 {
+        bail!(
+            "background buffer holds {} samples, expected {width}x{height}x3",
+            rgb.len()
+        );
     }
-    let image: RgbaImage =
-        RgbaImage::from_raw(width, height, rgba).context("cannot build the mask image")?;
+    let image =
+        RgbImage::from_raw(width, height, rgb.to_vec()).context("cannot build the background")?;
+    encode_png(DynamicImage::ImageRgb8(image))
+}
+
+fn encode_png(image: DynamicImage) -> Result<Vec<u8>> {
     let mut buffer = Vec::new();
-    DynamicImage::ImageRgba8(image)
+    image
         .write_to(&mut Cursor::new(&mut buffer), ImageFormat::Png)
-        .context("cannot encode the mask as PNG")?;
+        .context("cannot encode the image as PNG")?;
     Ok(buffer)
 }
 
-/// Resolution at which the guided filter runs.
+/// Resolution at which the split pair is emitted.
 ///
-/// Capped so a 5K wallpaper does not pay for a full-resolution filter; the depth
-/// field carries no detail above this anyway.
+/// The pair is a pointwise function of the refined depth field, so it cannot
+/// carry detail that field does not have. Emitting it at the wallpaper's own
+/// resolution therefore buys nothing and costs a great deal: on a 5K wallpaper
+/// the output was seven times the pixels of the field it came from, all of it
+/// upsampled, PNG-encoded, written to disk, read back and uploaded to the GPU.
+/// The consumer scales the output anyway, and does it on the GPU for free.
 fn refinement_size(source_width: u32, source_height: u32) -> (u32, u32) {
     let scale = f64::min(
         1.0,
@@ -276,19 +415,6 @@ fn refinement_size(source_width: u32, source_height: u32) -> (u32, u32) {
         ((source_width as f64 * scale).round() as u32).max(1),
         ((source_height as f64 * scale).round() as u32).max(1),
     )
-}
-
-/// Resolution at which the occlusion mask is emitted.
-///
-/// The mask is a pointwise function of the refined depth field, so it cannot
-/// carry detail that field does not have. Emitting it at the wallpaper's own
-/// resolution therefore buys nothing and costs a great deal: on a 5K wallpaper
-/// the mask was seven times the pixels of the field it came from, all of it
-/// upsampled, PNG-encoded, written to disk, read back and uploaded to the GPU.
-/// The consumer scales the mask to the output regardless, and does it on the
-/// GPU for free, so the mask follows the depth field instead.
-fn mask_size(source_width: u32, source_height: u32) -> (u32, u32) {
-    refinement_size(source_width, source_height)
 }
 
 /// Decode the wallpaper to RGB, at most once per invocation.
@@ -364,7 +490,11 @@ fn refine_at_resolution(
 /// Remove every cached artefact. Model files are untouched.
 pub fn clear_cache(paths: &Paths) -> Result<usize> {
     let mut removed = 0;
-    for directory in [paths.depth_cache(), paths.refined_cache(), paths.mask_cache()] {
+    for directory in [
+        paths.depth_cache(),
+        paths.refined_cache(),
+        paths.split_cache(),
+    ] {
         if let Ok(entries) = fs::read_dir(&directory) {
             for entry in entries.flatten() {
                 if entry.path().is_file() && fs::remove_file(entry.path()).is_ok() {
@@ -397,16 +527,236 @@ mod tests {
         assert_eq!(alpha[2], 1.0);
     }
 
+
     #[test]
-    fn mask_png_carries_coverage_in_the_alpha_channel() {
-        let encoded = encode_mask_png(2, 2, &[0, 128, 255, 64]).unwrap();
+    fn split_carries_coverage_in_the_foreground_alpha() {
+        let source = RgbImage::from_fn(2, 2, |x, y| {
+            image::Rgb([(x * 100 + 10) as u8, (y * 40 + 20) as u8, 7])
+        });
+        let (foreground, _) = split_at_resolution(&source, &[0.0, 0.5, 1.0, 1.0]);
+
+        assert_eq!(foreground.len(), 2 * 2 * 4);
+        let alphas: Vec<u8> = foreground.chunks_exact(4).map(|p| p[3]).collect();
+        assert_eq!(alphas, vec![0, 128, 255, 255]);
+
+        // Straight alpha: every pixel keeps its own colour, including the fully
+        // transparent one. Premultiplying here — the obvious-looking choice —
+        // makes QML apply the alpha a second time and washes the subject out.
+        // The colour must be the source's own, at *every* coverage — including
+        // the half-covered pixel and the fully transparent one. Under the
+        // premultiplied convention the transparent pixel would read [0, 0, 0]
+        // and the half-covered one would read half its colour; that is exactly
+        // the signature the consumer then applies alpha to a second time.
+        for (index, expected) in [
+            (0usize, [10u8, 20, 7]),
+            (1, [110, 20, 7]),
+            (2, [10, 60, 7]),
+            (3, [110, 60, 7]),
+        ] {
+            assert_eq!(
+                &foreground[index * 4..index * 4 + 3],
+                &expected,
+                "pixel {index} colour was altered"
+            );
+            assert_eq!(
+                &foreground[index * 4 + 3],
+                &alphas[index],
+                "pixel {index} alpha moved"
+            );
+        }
+    }
+
+    #[test]
+    fn split_reconstructs_the_source_when_recomposited() {
+        // The defining property of the pair, stated in the convention the pair
+        // actually uses: a straight-alpha foreground composited over the opaque
+        // background with the standard over-operator returns the source.
+        //
+        //     alpha * foreground + (1 - alpha) * background == source
+        //
+        // Outside the fill the background is the source verbatim, so this holds
+        // by construction; the test is here to catch a regression that breaks
+        // the pairing — for instance mixing the fill with the soft alpha rather
+        // than the hard coverage, which leaves the subject in the background and
+        // double-counts it along every feathered edge.
+        //
+        // The fill legitimately covers more than the subject: it reads only from
+        // pixels outside, so the region it overwrites is the alpha field grown by
+        // `FILL_DILATE_PIXELS`. A test that demanded an exact match right up to
+        // the subject's boundary would be asserting the opposite of what the
+        // dilation exists to do.
+        let (width, height) = (64u32, 40u32);
+        let source = RgbImage::from_fn(width, height, |x, y| {
+            image::Rgb([(x * 4) as u8, (y * 6) as u8, 128])
+        });
+        // Subject on the right half; the margin below accounts for the dilation
+        // plus the blur radius (6% of 40, rounded up to 3).
+        let boundary = 32usize;
+        let margin = FILL_DILATE_PIXELS as usize + 4;
+        let alpha: Vec<f32> = (0..(width * height) as usize)
+            .map(|index| if (index % width as usize) >= boundary { 1.0 } else { 0.0 })
+            .collect();
+        let (foreground, background) = split_at_resolution(&source, &alpha);
+
+        for index in 0..(width * height) as usize {
+            let x = index % width as usize;
+            if x + margin >= boundary && x < boundary + margin {
+                // Inside the fill's reach: the background is the blurred
+                // estimate there, so the identity does not apply.
+                continue;
+            }
+            let a = alpha[index];
+            for channel in 0..3 {
+                let fg = foreground[index * 4 + channel] as f32;
+                let bg = background[index * 3 + channel] as f32;
+                let rebuilt = a * fg + (1.0 - a) * bg;
+                let original = source.as_raw()[index * 3 + channel] as f32;
+                assert!(
+                    (rebuilt - original).abs() <= 1.5,
+                    "pixel {index} (x={x}) channel {channel}: rebuilt {rebuilt} vs {original}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_background_never_retains_the_subject_under_a_soft_edge() {
+        // Regression for the pairing bug this file shipped once already.
+        //
+        // With a straight-alpha foreground the composite is
+        // `alpha * fg + (1 - alpha) * bg`, so the background is forced to the
+        // source value wherever `alpha < 1`. Blending the fill in by the soft
+        // alpha leaves the subject sitting in the background along the feathered
+        // rim; the composite then adds the subject to itself and a bright halo
+        // traces the silhouette.
+        //
+        // A hard-edged alpha cannot see this — every pixel is 0 or 1 and the two
+        // formulations coincide. The stimulus has to be a soft ramp.
+        let (width, height) = (64u32, 32u32);
+        let source = RgbImage::from_fn(width, height, |x, _| {
+            image::Rgb([(x * 4).min(255) as u8, 30, 200])
+        });
+        // A one-pixel-wide feather at x == 32: 0 below, 1 above, half in between.
+        let alpha: Vec<f32> = (0..(width * height) as usize)
+            .map(|index| {
+                let x = index % width as usize;
+                match x {
+                    32 => 0.5,
+                    x if x > 32 => 1.0,
+                    _ => 0.0,
+                }
+            })
+            .collect();
+        let (foreground, background) = split_at_resolution(&source, &alpha);
+
+        // At the feathered column the composite must still be the source. Under
+        // the soft-blend formulation the background there is a mix of the source
+        // and the fill, so this drifts by O(half the local contrast).
+        let index = 16 * width as usize + 32;
+        assert_eq!(alpha[index], 0.5, "test premise: pixel is feathered");
+        let fg = foreground[index * 4] as f32;
+        let bg = background[index * 3] as f32;
+        let rebuilt = 0.5 * fg + 0.5 * bg;
+        let original = source.as_raw()[index * 3] as f32;
+        assert!(
+            (rebuilt - original).abs() <= 1.0,
+            "feathered pixel rebuilt as {rebuilt}, source is {original} \
+             — the background kept the subject"
+        );
+    }
+
+    #[test]
+    fn fill_uses_the_dilated_alpha_not_the_raw_one() {
+        // At the subject's own boundary alpha is 1, so a fill keyed on it would
+        // contribute nothing and the background would keep the subject exactly.
+        // Keyed on the dilation it must differ from the source there.
+        //
+        // The source has to be something a blur cannot reproduce, or the check
+        // passes vacuously: a linear ramp, for instance, is a blur fixed point,
+        // so blurring it changes nothing and both formulations look identical.
+        // A hard step edge is the right stimulus.
+        let (width, height) = (64u32, 64u32);
+        let source = RgbImage::from_fn(width, height, |x, _| {
+            if x % 8 < 4 {
+                image::Rgb([20, 30, 200])
+            } else {
+                image::Rgb([230, 210, 40])
+            }
+        });
+        let alpha: Vec<f32> = (0..(width * height) as usize)
+            .map(|index| if (index % width as usize) >= 32 { 1.0 } else { 0.0 })
+            .collect();
+        let (_, background) = split_at_resolution(&source, &alpha);
+
+        // A pixel just inside the subject: alpha is 1, but the dilated coverage
+        // reaches here, so the background must have been repainted.
+        let index = 40 * width as usize + 34;
+        assert_eq!(alpha[index], 1.0, "test premise: pixel is subject");
+        assert_ne!(
+            &background[index * 3..index * 3 + 3],
+            &source.as_raw()[index * 3..index * 3 + 3],
+            "the fill did not reach past the subject boundary"
+        );
+    }
+
+    #[test]
+    fn background_is_untouched_where_there_is_no_subject() {
+        let (width, height) = (16u32, 16u32);
+        let source = RgbImage::from_fn(width, height, |x, y| {
+            image::Rgb([(x * 16) as u8, (y * 16) as u8, 200])
+        });
+        // Subject confined to the left eighth; the fill's dilation plus blur
+        // radius reach well past it, but nowhere near the right eighth.
+        let alpha: Vec<f32> = (0..(width * height) as usize)
+            .map(|index| if (index % width as usize) < 2 { 1.0 } else { 0.0 })
+            .collect();
+        let (_, background) = split_at_resolution(&source, &alpha);
+
+        for y in 0..height as usize {
+            for x in 12..width as usize {
+                let index = y * width as usize + x;
+                assert_eq!(
+                    &background[index * 3..index * 3 + 3],
+                    &source.as_raw()[index * 3..index * 3 + 3],
+                    "the fill leaked into pixel ({x},{y})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn split_rejects_a_buffer_that_does_not_match_its_dimensions() {
+        // Guards the size coupling: a mismatch would otherwise produce a
+        // silently corrupted PNG.
+        assert!(encode_foreground_png(2, 2, &[0u8; 16]).is_ok());
+        assert!(encode_foreground_png(2, 2, &[0u8; 15]).is_err());
+        assert!(encode_background_png(2, 2, &[0u8; 12]).is_ok());
+        assert!(encode_background_png(2, 2, &[0u8; 11]).is_err());
+    }
+
+    #[test]
+    fn foreground_png_round_trips_its_alpha() {
+        let encoded = encode_foreground_png(2, 2, &[
+            10, 20, 30, 0, 40, 50, 60, 128, 70, 80, 90, 255, 1, 2, 3, 64,
+        ])
+        .unwrap();
         let decoded = image::load_from_memory(&encoded).unwrap().to_rgba8();
         assert_eq!(decoded.dimensions(), (2, 2));
         let alphas: Vec<u8> = decoded.pixels().map(|pixel| pixel.0[3]).collect();
         assert_eq!(alphas, vec![0, 128, 255, 64]);
-        for pixel in decoded.pixels() {
-            assert_eq!(&pixel.0[0..3], &[255, 255, 255], "RGB must stay white");
-        }
+        // Unlike the old mask tier, the colour channels must survive: they are
+        // the subject itself, not a placeholder.
+        assert_eq!(decoded.get_pixel(1, 0).0, [40, 50, 60, 128]);
+    }
+
+    #[test]
+    fn background_png_is_opaque_rgb() {
+        // RGB, not RGBA: an alpha channel here would be a quarter more bytes
+        // for a value that is 255 by construction.
+        let encoded = encode_background_png(2, 1, &[10, 20, 30, 40, 50, 60]).unwrap();
+        let decoded = image::load_from_memory(&encoded).unwrap();
+        assert_eq!(decoded.color(), image::ColorType::Rgb8);
+        assert_eq!(decoded.to_rgb8().get_pixel(1, 0).0, [40, 50, 60]);
     }
 
     #[test]
@@ -420,26 +770,27 @@ mod tests {
     }
 
     #[test]
-    fn mask_never_out_resolves_the_depth_field_it_comes_from() {
-        // Above the cap the mask follows the refinement size, so a 5K wallpaper
-        // stops paying for a 5K PNG.
-        assert_eq!(mask_size(5120, 2880), (REFINEMENT_MAX_DIMENSION, 1080));
-        // Below the cap nothing is dropped: the mask is the wallpaper.
-        assert_eq!(mask_size(1920, 1080), (1920, 1080));
-        assert_eq!(mask_size(1280, 720), (1280, 720));
+    fn output_never_out_resolves_the_depth_field_it_comes_from() {
+        // Above the cap the output follows the refinement size, so a 5K
+        // wallpaper stops paying for a 5K PNG.
+        assert_eq!(refinement_size(5120, 2880), (REFINEMENT_MAX_DIMENSION, 1080));
+        // Below the cap nothing is dropped: the output is the wallpaper.
+        assert_eq!(refinement_size(1920, 1080), (1920, 1080));
+        assert_eq!(refinement_size(1280, 720), (1280, 720));
     }
 
     #[test]
-    fn mask_keeps_the_wallpaper_aspect_ratio() {
-        // The consumer scales the mask to the output with PreserveAspectCrop,
-        // so a mask that is not the wallpaper's shape would be cropped wrongly.
+    fn output_keeps_the_wallpaper_aspect_ratio() {
+        // The consumer scales both images to the output with PreserveAspectCrop,
+        // so a pair that is not the wallpaper's shape would be cropped wrongly —
+        // and, worse, cropped differently from the other one.
         for (width, height) in [(5120, 2880), (3840, 1600), (1000, 1000), (4096, 512)] {
-            let (mask_width, mask_height) = mask_size(width, height);
+            let (output_width, output_height) = refinement_size(width, height);
             let expected = width as f64 / height as f64;
-            let actual = mask_width as f64 / mask_height as f64;
+            let actual = output_width as f64 / output_height as f64;
             assert!(
                 (actual - expected).abs() < 0.002,
-                "{width}x{height} produced {mask_width}x{mask_height}"
+                "{width}x{height} produced {output_width}x{output_height}"
             );
         }
     }
@@ -464,14 +815,6 @@ mod tests {
         assert_eq!(again.as_raw().len(), 4 * 3 * 3);
 
         fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn mask_encoding_rejects_a_buffer_that_does_not_match_its_dimensions() {
-        // Guards the mask_size / alpha-length coupling: a mismatch would
-        // otherwise produce a silently corrupted PNG.
-        assert!(encode_mask_png(2, 2, &[0, 128, 255, 64]).is_ok());
-        assert!(encode_mask_png(2, 2, &[0, 128, 255]).is_err());
     }
 
     #[test]

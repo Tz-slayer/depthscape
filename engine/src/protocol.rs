@@ -34,23 +34,24 @@ pub struct ModelInfo {
 pub struct CacheInfo {
     pub depthEntries: usize,
     pub refinedEntries: usize,
-    pub maskEntries: usize,
+    pub splitEntries: usize,
 }
 
 #[derive(Serialize)]
 pub struct AnalyzeReport {
-    pub maskPath: String,
+    pub foregroundPath: String,
+    pub backgroundPath: String,
     pub wallpaperPath: String,
     /// Wallpaper dimensions.
     pub width: u32,
     pub height: u32,
-    /// Mask dimensions. Equal to the wallpaper below the refinement cap, and
-    /// smaller above it — see `pipeline::mask_size`.
-    pub maskWidth: u32,
-    pub maskHeight: u32,
+    /// Dimensions of the emitted pair. Equal to the wallpaper below the
+    /// refinement cap, and smaller above it — see `pipeline::refinement_size`.
+    pub outputWidth: u32,
+    pub outputHeight: u32,
     pub depthCacheHit: bool,
     pub refinedCacheHit: bool,
-    pub maskCacheHit: bool,
+    pub splitCacheHit: bool,
     pub elapsedMs: u64,
     pub timings: TimingsReport,
 }
@@ -62,7 +63,7 @@ pub struct TimingsReport {
     pub decodeMs: u64,
     pub depthMs: u64,
     pub refineMs: u64,
-    pub maskMs: u64,
+    pub splitMs: u64,
     pub pruneMs: u64,
 }
 
@@ -92,7 +93,7 @@ pub fn status(paths: &Paths) -> anyhow::Result<StatusReport> {
         cache: CacheInfo {
             depthEntries: count_files(&paths.depth_cache()),
             refinedEntries: count_files(&paths.refined_cache()),
-            maskEntries: count_files(&paths.mask_cache()),
+            splitEntries: count_files(&paths.split_cache()),
         },
         dataDir: paths.root().display().to_string(),
     })
@@ -115,22 +116,23 @@ pub fn setup(paths: &Paths, downloaded: bool) -> anyhow::Result<SetupReport> {
 impl From<AnalyzeOutcome> for AnalyzeReport {
     fn from(outcome: AnalyzeOutcome) -> Self {
         Self {
-            maskPath: outcome.mask_path.display().to_string(),
+            foregroundPath: outcome.foreground_path.display().to_string(),
+            backgroundPath: outcome.background_path.display().to_string(),
             wallpaperPath: outcome.wallpaper_path.display().to_string(),
             width: outcome.width,
             height: outcome.height,
-            maskWidth: outcome.mask_width,
-            maskHeight: outcome.mask_height,
+            outputWidth: outcome.output_width,
+            outputHeight: outcome.output_height,
             depthCacheHit: outcome.depth_cache_hit,
             refinedCacheHit: outcome.refined_cache_hit,
-            maskCacheHit: outcome.mask_cache_hit,
+            splitCacheHit: outcome.split_cache_hit,
             elapsedMs: outcome.elapsed_ms as u64,
             timings: TimingsReport {
                 hashMs: outcome.timings.hash_ms as u64,
                 decodeMs: outcome.timings.decode_ms as u64,
                 depthMs: outcome.timings.depth_ms as u64,
                 refineMs: outcome.timings.refine_ms as u64,
-                maskMs: outcome.timings.mask_ms as u64,
+                splitMs: outcome.timings.split_ms as u64,
                 pruneMs: outcome.timings.prune_ms as u64,
             },
         }

@@ -1,70 +1,36 @@
 import QtQuick
 import Quickshell
 import Quickshell.Wayland
-import Qt5Compat.GraphicalEffects
 
-// Full-screen, click-through foreground layer.
+// Top-most of the three Depthscape surfaces: the subject, cut out of the scene.
 //
-// This surface is what makes the whole effect possible. It sits on the `bottom`
-// layer, which layer-shell orders above `background` (the wallpaper) and below
-// ordinary application windows, which the compositor places between `bottom`
-// and `top`. That is exactly the stacking an iOS depth lock screen uses.
+// WHY A PLAIN Image IS ENOUGH
 //
-// Nothing in the documented DMS plugin API provides such a layer. It exists
-// only because a plugin may create its own PanelWindow, the same technique
-// DankIsland uses for its overlay surface.
+// The engine writes a straight-alpha RGBA PNG whose colour channel holds the
+// subject verbatim and whose alpha channel holds the coverage. Compositing that
+// is exactly what sampling an RGBA image does, so there is no mask to marry it
+// with, no shader, and no hidden layers.
 //
-// STACKING — read before changing the layer.
+// Straight alpha also means the previous `OpacityMask` from
+// Qt5Compat.GraphicalEffects is gone. That module is one DMS itself does not use,
+// so it was a dependency every user had to install for a plugin that otherwise
+// needed nothing.
 //
-// The layer is set by the caller (`DepthDaemon.backgroundLayer`), defaulting to
-// `background`. `background` is a strictly lower layer than `bottom`, so on it
-// the foreground sits below the desktop widgets and cannot ever occlude them.
+// LAYER AND ORDERING
 //
-// Under `bottom` the ordering is subtler: DMS draws desktop widgets on `bottom`
-// too (DesktopPluginWrapper.qml, the default branch of `WlrLayershell.layer`),
-// not on `background` as the plugin docs claim. So the foreground shares a
-// layer with the widgets it is supposed to occlude, and the layer-shell *layer*
-// alone does not order the two.
-//
-// Within a layer, niri/smithay stack surfaces by **map order**: the surface
-// mapped last is drawn on top (measured, see docs/depthscape.md §14.1).
-// DMS relies on the same rule and rebuilds its widgets whenever the instance
-// list changes (DesktopWidgetLayer.qml: "Layer surfaces stack by map order").
-// DepthDaemon therefore re-maps this surface after such a rebuild — do not
-// remove that, or the foreground silently drops behind the widgets.
-//
-// MASKING — why OpacityMask and not MultiEffect.
-//
-// `MultiEffect { maskEnabled: true; maskSource: <hidden Image> }` does NOT work
-// reliably here. Measured: 28 of 63 opaque sample points came out unmasked,
-// with `layer.effect: MultiEffect` and with MultiEffect-as-an-item alike.
-// The cause is that `layer.enabled: true` on an *invisible* Image does not
-// reliably produce an up-to-date layer texture, and the mask Image is exactly
-// that. `OpacityMask` keeps its sources live internally, and measured 63/63
-// correct on the same fixture.
-//
-// The cost is a dependency DMS itself does not use: Qt5Compat.GraphicalEffects
-// (packaged as qt6-5compat / qml6-module-qt5compat-graphicaleffects). It is
-// listed in plugin.json `dependencies` and checked by StartupCheck.qml.
+// Same layer as the background and the widgets (`background`), mapped last so it
+// draws above both — that is what puts the subject in front of the clock and
+// gives the wallpaper its depth. DepthDaemon owns that sequencing; this file
+// only has to be a correctly-behaved surface.
 PanelWindow {
     id: root
 
-    // Deliberately NOT called `screen`: PanelWindow already has a `screen`
-    // property, and redeclaring it shadows the base one, which makes every
-    // instance fall back to the compositor's default output instead of the one
-    // it was handed. Assign `screen: targetScreen` below instead.
-    // (DankIsland's IslandWindow uses the same indirection.)
+    // Deliberately NOT called `screen` — see DepthBackground.qml.
     required property var targetScreen
 
-    // Set by DepthDaemon. Defaults to `bottom`, the conservative choice for a
-    // standalone host; the daemon overrides it with `background` by default so
-    // the niri overview shares one composite instead of cloning it per card.
-    property int layer: WlrLayer.Bottom
+    property string foregroundPath: ""
 
-    property string wallpaperPath: ""
-    property string maskPath: ""
-
-    readonly property bool active: wallpaperPath !== "" && maskPath !== ""
+    readonly property bool active: foregroundPath !== ""
 
     screen: root.targetScreen
     visible: root.active
@@ -72,8 +38,8 @@ PanelWindow {
     implicitWidth: root.targetScreen ? root.targetScreen.width : 0
     implicitHeight: root.targetScreen ? root.targetScreen.height : 0
 
-    WlrLayershell.namespace: "dms:plugins:depthscape-foreground"
-    WlrLayershell.layer: root.layer
+    WlrLayershell.namespace: "depthscape:foreground"
+    WlrLayershell.layer: WlrLayer.Background
     WlrLayershell.exclusiveZone: -1
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
 
@@ -84,39 +50,21 @@ PanelWindow {
         bottom: true
     }
 
-    // An empty input region makes the surface completely click-through, so the
-    // desktop widgets underneath keep receiving input normally.
+    // Click-through: the subject looks like it is on the wallpaper, and it must
+    // not swallow clicks meant for the widgets or the desktop beneath it.
     mask: Region {}
 
-    // The wallpaper, kept off-screen: only its texture is used.
+    // Must scale identically to DepthBackground's Image, or the subject drifts
+    // away from the hole it was cut out of. Both use PreserveAspectCrop and both
+    // fill the same rect, so they agree by construction.
     Image {
-        id: wallpaperImage
-
         anchors.fill: parent
-        source: root.wallpaperPath !== "" ? "file://" + root.wallpaperPath : ""
+        source: root.foregroundPath !== "" ? "file://" + root.foregroundPath : ""
         fillMode: Image.PreserveAspectCrop
+        // Same reasoning as the background: the URL is stable across
+        // regenerations and these are full-screen RGBA textures.
         cache: false
-        visible: false
-        layer.enabled: true
-    }
-
-    // The mask is RGBA with the coverage in the alpha channel (see
-    // docs/depthscape.md §7.2). OpacityMask reads exactly that alpha.
-    Image {
-        id: maskImage
-
-        anchors.fill: parent
-        source: root.maskPath !== "" ? "file://" + root.maskPath : ""
-        fillMode: Image.PreserveAspectCrop
-        cache: false
-        visible: false
-        layer.enabled: true
-    }
-
-    OpacityMask {
-        anchors.fill: parent
-        source: wallpaperImage
-        maskSource: maskImage
+        asynchronous: true
+        smooth: true
     }
 }
-

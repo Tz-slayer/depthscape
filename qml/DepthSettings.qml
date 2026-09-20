@@ -20,22 +20,31 @@ PluginSettings {
     ToggleSetting {
         settingKey: "effectEnabled"
         label: "Depth effect"
-        description: "Draw the wallpaper foreground above desktop widgets"
+        description: "Split the wallpaper and draw the subject in front of desktop widgets"
         defaultValue: true
     }
 
     ToggleSetting {
-        settingKey: "backgroundLayer"
-        label: "Draw in the backdrop"
-        description: "Use the background layer so the niri overview shares one composite instead of repeating it in every workspace card. Desktop widgets will sit above the foreground."
+        settingKey: "widgetsEnabled"
+        label: "Show Depthscape widgets"
+        description: "Draw Depthscape's own widgets between the background and the subject, so the subject passes in front of them"
         defaultValue: true
     }
 
     ToggleSetting {
         settingKey: "autoGenerate"
         label: "Generate automatically"
-        description: "Rebuild the mask whenever the wallpaper or a parameter changes"
+        description: "Rebuild the images whenever the wallpaper or a parameter changes"
         defaultValue: true
+    }
+
+    StyledText {
+        width: parent.width
+        text: "Depthscape draws its own background, so turn the DMS wallpaper off while this is enabled — otherwise the two are drawn on top of each other."
+        color: Theme.surfaceVariantText
+        font.pixelSize: Theme.fontSizeSmall
+        wrapMode: Text.WordWrap
+        topPadding: Theme.spacingS
     }
 
     StyledText {
@@ -65,6 +74,39 @@ PluginSettings {
         minimum: 0
         maximum: 50
         unit: "%"
+    }
+
+    StyledText {
+        width: parent.width
+        text: "Widgets"
+        color: Theme.surfaceText
+        font.pixelSize: Theme.fontSizeLarge
+        font.weight: Font.Bold
+        topPadding: Theme.spacingL
+    }
+
+    StyledText {
+        width: parent.width
+        text: "Depthscape's widgets are placed from a layout file at "
+            + "$XDG_DATA_HOME/depthscape/widgets.json. Each entry has a type, a "
+            + "position in pixels from the top-left of the output, and a settings "
+            + "object — for the clock, \u007b \"type\": \"clock\", \"x\": 1100, "
+            + "\"y\": 900, \"settings\": \u007b \"showSeconds\": false \u007d \u007d. "
+            + "Entries with no \"screen\" key appear on every output."
+        color: Theme.surfaceVariantText
+        font.pixelSize: Theme.fontSizeSmall
+        wrapMode: Text.WordWrap
+    }
+
+    Row {
+        width: parent.width
+        spacing: Theme.spacingS
+
+        DankButton {
+            text: "Write example layout"
+            iconName: "edit"
+            onClicked: root.requestAction("exampleLayout")
+        }
     }
 
     StyledText {

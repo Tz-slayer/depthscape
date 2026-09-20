@@ -13,9 +13,8 @@
 
 - 前景人物遮挡桌面组件；
 - 类 iOS 锁屏的景深效果；
-- AI 自动深度估计；
-- AI 主体分割；
-- 鼠标驱动的 2.5D 视差；
+- AI 自动深度估计（**不做主体分割**，见 §14.2）；
+- 导航驱动的 2.5D 视差；
 - 基于深度图的 Shader 效果；
 - 可选的粒子、音频响应和场景交互；
 - 多显示器独立壁纸与独立缓存。
@@ -50,13 +49,13 @@ DMS Depthscape
 │   └── Other Providers
 │
 ├── AI Analysis
-│   ├── Subject Segmentation
 │   ├── Depth Estimation
-│   └── Scene Analysis
+│   ├── Guided Refinement
+│   └── Foreground / Background Split
 │
 ├── Depth Effects
 │   ├── Widget Occlusion
-│   ├── Foreground Mask
+│   ├── Background Fill
 │   ├── Multi-layer Composition
 │   └── Depth-aware Blur
 │
@@ -86,26 +85,30 @@ DMS Depthscape
 
 ### 3.1 iOS 风格主体遮挡
 
-用户选择一张人物壁纸后，系统自动识别前景人物：
+用户选择一张人物壁纸后，系统自动识别前景主体：
 
 ```text
 Original Wallpaper
         │
         ▼
-Subject Segmentation
+Depth Estimation
         │
         ▼
-Foreground Mask
+Foreground / Background Split
+        │
+        ├──► foreground.png   （主体，straight alpha）
+        └──► background.png   （填充后的背景，不透明）
 ```
 
-桌面最终采用如下分层：
+桌面最终采用如下分层（三个 surface 都落在 layer-shell 的 `bottom` 层，
+按 map 顺序自下而上）：
 
 ```text
-Foreground Character
+DepthForeground     ← 主体，straight alpha
         ↑
-Clock / Weather / Media Widget
+DepthWidgetHost     ← 自研 clock 等桌面组件
         ↑
-Background Wallpaper
+DepthBackground     ← 填充后的背景（不透明）
 ```
 
 从而形成：
@@ -121,7 +124,11 @@ Background Wallpaper
             █████████
 ```
 
-人物头部、头发或身体可以自然遮挡部分时间和 Widget，形成类似 iOS 景深锁屏的视觉效果。
+主体头部、头发或身体可以自然遮挡部分时间和 Widget，形成类似 iOS 景深锁屏的视觉效果。
+
+注意：DMS 自带的壁纸（`WallpaperBackground.qml`）与我们画的背景是同一张图，
+两者叠在一起时前景会完全不可见（推导见 §14.2）。因此**启用 Depthscape 时要关掉
+DMS 自己的壁纸**。
 
 ---
 
@@ -145,31 +152,27 @@ Depth Map
 
 深度图可用于：
 
-- 自动生成前景 Mask；
+- 自动拆出前景与背景（§14.2）；
 - 控制 Widget 遮挡；
-- 鼠标视差；
+- 导航驱动的视差；
 - 景深模糊；
 - 多层位移；
 - Shader 效果。
 
 ---
 
-### 3.3 2.5D 鼠标视差
+### 3.3 2.5D 视差
 
-当用户移动鼠标时，根据 Depth Map 对不同深度区域施加不同位移：
+切换 workspace / column 时，按相对深度施加不同方向的位移：
 
 ```text
-Mouse Move
+niri 导航事件
     │
     ▼
-Normalized Cursor Position
+累计偏移（钳制在 maxTravel 内）
     │
-    ▼
-Depth-aware Offset
-    │
-    ├── Foreground: large offset
-    ├── Midground: medium offset
-    └── Background: small offset
+    ├── Foreground: +offset
+    └── Background:  reverse
 ```
 
 最终形成近景移动快、远景移动慢的空间感。
@@ -178,6 +181,9 @@ Depth-aware Offset
 
 ## 4. 总体架构
 
+> **V0.3 起，引擎拆图，不再输出遮罩。** 见 §14.2 的论证：只给遮罩在数学上
+> 无法产生遮挡效果。下面这张图描述的是当前实现。
+
 ```mermaid
 flowchart TB
     USER[用户选择 / 切换壁纸]
@@ -185,47 +191,64 @@ flowchart TB
     subgraph DMS[DMS / Quickshell]
         WATCHER[Wallpaper Watcher]
         UI[Depthscape Settings UI]
-        SCENE[Depthscape Scene Renderer]
-        WIDGETS[DMS Desktop Widgets]
+        DAEMON[Depthscape Daemon]
     end
 
-    subgraph ENGINE[Depthscape AI Engine]
+    subgraph ENGINE[Depthscape Engine]
         HASH[Wallpaper Hash]
-        CACHE[Cache Manager]
-        SEG[Subject Segmentation]
-        DEPTH[Depth Estimation]
-        MASK[Mask Generator]
+        CACHE[Three-tier Cache]
+        DEPTH[Depth Anything V2 Small]
+        REFINE[Guided Filter]
+        SPLIT[Splitter]
     end
 
-    subgraph OUTPUT[Generated Assets]
-        RGB[Wallpaper RGB]
-        DEPTHMAP[Depth Map]
-        SUBJECT[Subject Mask]
-        OCCLUSION[Occlusion Mask]
+    subgraph LAYERS[background 层，按 map 顺序]
+        BG[DepthBackground<br/>depthscape:background]
+        WH[DepthWidgetHost<br/>depthscape:widgets]
+        FG[DepthForeground<br/>depthscape:foreground]
+    end
+
+    subgraph ASSETS[每个输出各自一份]
+        WPRGB[Wallpaper RGB]
+        DEPTHMAP[Depth Map f32]
+        REFINED[Refined Field u16]
+        PAIR[foreground.png RGBA<br/>background.png RGB]
     end
 
     USER --> WATCHER
     WATCHER --> HASH
     HASH --> CACHE
 
-    CACHE -->|Cache Miss| SEG
-    CACHE -->|Cache Miss| DEPTH
+    CACHE -->|depth miss| DEPTH
+    CACHE -->|refined miss| REFINE
+    CACHE -->|split miss| SPLIT
 
-    SEG --> SUBJECT
     DEPTH --> DEPTHMAP
-    SUBJECT --> MASK
-    DEPTHMAP --> MASK
-    MASK --> OCCLUSION
+    DEPTHMAP --> REFINE
+    REFINE --> REFINED
+    REFINED --> SPLIT
+    WPRGB --> SPLIT
+    SPLIT --> PAIR
 
-    RGB --> SCENE
-    DEPTHMAP --> SCENE
-    SUBJECT --> SCENE
-    OCCLUSION --> SCENE
-    WIDGETS --> SCENE
-    UI --> SCENE
+    PAIR --> DAEMON
+    UI --> DAEMON
+    DAEMON -->|"先 map"| BG
+    DAEMON -->|"中间 map"| WH
+    DAEMON -->|"最后 map → 压在最上"| FG
 
-    SCENE --> DISPLAY[Wayland Desktop]
+    BG --> DISPLAY[Wayland Desktop]
+    WH --> DISPLAY
+    FG --> DISPLAY
 ```
+
+三层的堆叠关系是这套实现的核心。`background` 层的 surface 按 **map 顺序**
+堆叠，最后 map 的在最上，而 wlr-layer-shell **没有 raise 请求**——所以
+`DepthDaemon` 必须**分阶段**（stage 0→3，每 32ms 一步）把三个窗口交给
+compositor，否则顺序不确定。这是实测结论，不是推断，见 §14.1。
+
+`DepthWidgetHost` 是 Depthscape **自研**的 widget 宿主，不是 DMS 的桌面
+Widget。DMS 的桌面 Widget 在 `bottom` 层（严格高于 `background`），永远不会
+被主体遮挡，且会被复制进 overview 的每个 workspace card。见 §14.1 与 §14.5。
 
 ---
 
@@ -253,7 +276,7 @@ DepthDaemon / WallpaperWatcher
    │      AI 推理
    │         │
    │         ▼
-   │    生成 Depth / Mask
+   │    生成 Depth / Refined
    │         │
    └────┬────┘
         ▼
@@ -268,7 +291,7 @@ DMS Desktop Rendering
 正常桌面状态下不再调用 AI 模型：
 
 ```text
-Cached RGB / Depth / Mask
+Cached Depth / Refined / Split
             │
             ▼
        QtQuick / GPU
@@ -294,24 +317,25 @@ Cached RGB / Depth / Mask
 | UI         | **QML / QtQuick**           | 设置页、预览、前景渲染                    |
 | Shell API  | **Quickshell**              | Process、Wayland surface、DMS 集成 |
 | 插件形式       | **DMS Composite Plugin**    | Daemon + Desktop + Settings    |
-| 核心后端       | **Rust**                    | 模型调用、深度图、Mask、缓存               |
+| 核心后端       | **Rust**                    | 模型调用、深度图、拆图、缓存               |
 | AI Runtime | **ONNX Runtime**            | 本地推理                           |
 | V1 模型      | **Depth Anything V2 Small** | 单目深度估计                         |
-| 图像处理       | Rust `image` 等 crate        | resize、mask、blur、RGBA          |
+| 图像处理       | Rust `image` 等 crate        | resize、split、blur、RGBA        |
 | 缓存 Hash    | **BLAKE3**                  | 壁纸/model/参数缓存键                 |
 | 配置交换       | **JSON**                    | QML ↔ Rust                     |
 | V1 通信      | Process + stdin/stdout      | 简单稳定                           |
 | V2/V3 通信   | Unix Domain Socket          | 实时视差/长期 daemon                 |
 | V3 GPU     | **WGSL + wgpu**             | 2.5D / Parallax / Shader       |
 
-V1 额外引入一个 QML 模块：**`Qt5Compat.GraphicalEffects`**（`OpacityMask`），
-用于把遮罩合成到前景层。这不是随意选择——`MultiEffect` 在本环境下做遮罩不可靠，
-实测与原因见 §14.2。该模块在 `plugin.json` 的 `dependencies` 中声明，
-并由 `StartupCheck.qml` 在启用插件前校验。
+V1 **不引入任何额外 QML 模块**。合成所需的 `MultiEffect`（仅用于 overview
+模糊）来自 stock Qt 的 `QtQuick.Effects`；前景与背景就是两张普通
+`Image`，靠 layer-shell 的 map 顺序堆叠（§14.1）。历史上曾需要
+`Qt5Compat.GraphicalEffects` 的 `OpacityMask` 来合成遮罩，拆图方案落地后
+该依赖已删除（原因见 §14.2）。
 
 ### 6.2 核心后端选定 Rust
 
-AI 处理链路（模型调用、深度图、Mask 生成、缓存）全部放在独立的 Rust 可执行文件
+AI 处理链路（模型调用、深度图、精修、拆图、缓存）全部放在独立的 Rust 可执行文件
 `depthscape-engine` 中，而不是 Python 脚本。
 
 理由：
@@ -362,7 +386,7 @@ Depth Anything V2 Small 的官方发布值可以直接人工核对，且与 Hugg
 
 ```text
 AI 阶段（Rust + ONNX Runtime）
-    壁纸变化 → 推理 → 深度图 → Mask → 落盘缓存
+    壁纸变化 → 推理 → 深度图 → 精修 → 拆图 → 落盘缓存
     低频、可阻塞、允许秒级耗时
 
 渲染阶段（QML / QtQuick，V3 起为 WGSL + wgpu）
@@ -401,7 +425,7 @@ request analysis
 ### 7.2 DepthEngine
 
 独立的 Rust 模块，编译为单个可执行文件 `depthscape-engine`。
-它只负责把壁纸变成遮罩，不参与渲染，也不与合成器通信。
+它只负责把壁纸拆成前景与背景两张图，不参与渲染，也不与合成器通信。
 
 输入：
 
@@ -412,9 +436,10 @@ wallpaper.png / jpg / webp
 输出（全部落在插件数据目录，由引擎自行管理）：
 
 ```text
-cache/depth/<key>.dsc     模型原始输出，f32，推理分辨率
-cache/refined/<key>.dsr   精修后的深度，u16，精修分辨率
-cache/masks/<key>.png     遮罩，RGBA（alpha 即覆盖度），细化分辨率
+cache/depth/<key>.dsc      模型原始输出，f32，推理分辨率
+cache/refined/<key>.dsr    精修后的深度，u16，精修分辨率
+cache/split/<key>-fg.png   主体，straight-alpha RGBA，输出分辨率
+cache/split/<key>-bg.png   背景，RGB（不透明），输出分辨率
 ```
 
 接口：
@@ -427,31 +452,33 @@ depthscape-engine analyze --wallpaper <path> --threshold 0.30 --feather 0.08
 
 ```json
 {
-  "maskPath": "...",
+  "foregroundPath": "...",
+  "backgroundPath": "...",
   "wallpaperPath": "...",
-  "width": 2340,
-  "height": 1316,
-  "maskWidth": 1920,
-  "maskHeight": 1080,
+  "width": 5120,
+  "height": 2880,
+  "outputWidth": 1920,
+  "outputHeight": 1080,
   "depthCacheHit": true,
   "refinedCacheHit": true,
-  "maskCacheHit": false,
-  "elapsedMs": 86,
+  "splitCacheHit": false,
+  "elapsedMs": 458,
   "timings": {
-    "hashMs": 1, "decodeMs": 0, "depthMs": 0,
-    "refineMs": 1, "maskMs": 8, "pruneMs": 0
+    "hashMs": 1, "decodeMs": 81, "depthMs": 0,
+    "refineMs": 1, "splitMs": 372, "pruneMs": 0
   }
 }
 ```
 
-> `width` / `height` 是壁纸尺寸，`maskWidth` / `maskHeight` 是遮罩尺寸。
-> 遮罩按细化分辨率输出，因此通常**小于**壁纸（见 §11）；
-> 消费侧按比例缩放即可，不需要两者相等。
-> `timings` 是各阶段的独占耗时，用来在不出动 profiler 的情况下定位慢在哪。
+> `width` / `height` 是壁纸尺寸，`outputWidth` / `outputHeight` 是拆图尺寸。
+> 拆图按细化分辨率输出，因此通常**小于**壁纸（见 §11）；
+> 两个 surface 按同一比例缩放即可，不需要两者相等。
 
-> 遮罩使用 **RGBA 而非灰度**：QML 侧用 `OpacityMask` 按 alpha 通道遮罩，
-> 灰度 PNG 会以 `alpha = 1` 载入，导致整个屏幕被前景覆盖。
-> （为什么不是 `MultiEffect`：见 §14.2。）
+> **`-fg.png` 是 straight alpha，不是预乘；`-bg.png` 是 RGB 而非 RGBA。**
+> 两者都是刻意的，理由与失效模式见 §14.2——那里的推导比这里重要得多。
+
+> 三级缓存的 key 各自独立：**精修只依赖深度场**，**拆图才读 threshold /
+> feather**。所以拖滑块只重跑 split，不重跑模型也不重跑精修。
 
 V1 采用「一次调用一次进程」：无状态、可直接在终端手敲调试、
 引擎崩溃不影响 shell 会话；输出单行 JSON，QML 侧无需处理粘包。
@@ -465,17 +492,18 @@ V1 采用「一次调用一次进程」：无状态、可直接在终端手敲�
 
 ```text
 $XDG_DATA_HOME/depthscape/cache/
-├── depth/<key>.dsc      模型输出（f32）        保留 8
-├── refined/<key>.dsr    精修深度（u16）        保留 4
-└── masks/<key>.png      遮罩（RGBA）          保留 32
+├── depth/<key>.dsc           模型输出（f32）      保留 8
+├── refined/<key>.dsr         精修深度（u16）      保留 4
+└── split/<key>-fg.png        主体（RGBA）        保留 32
+    split/<key>-bg.png        背景（RGB）         与 fg 同 key
 ```
 
 键的构造（哈希算法为 BLAKE3）：
 
 ```text
 depth   = BLAKE3(壁纸内容) - 模型指纹 - d<depth pipeline 版本> - i<推理尺寸>
-refined = depth - r<depth pipeline 版本>                              (.dsr)
-mask    = depth - v<mask pipeline 版本> - t<threshold> - f<feather>   (.png)
+refined = depth - r<depth pipeline 版本>                               (.dsr)
+split   = depth - v<split pipeline 版本> - t<threshold> - f<feather>   (-fg/-bg.png)
 ```
 
 两个关键点：
@@ -489,64 +517,98 @@ mask    = depth - v<mask pipeline 版本> - t<threshold> - f<feather>   (.png)
 清理按 `mtime` 倒序做 LRU；写入一律先落临时文件再 `rename`，
 保证读到的要么是完整的旧版本，要么是完整的新版本。
 
-> 缓存放 `$XDG_DATA_HOME` 而不是 `~/.cache`：遮罩是用户显式要求生成、
+> 缓存放 `$XDG_DATA_HOME` 而不是 `~/.cache`：拆图是用户显式要求生成、
 > 且重新生成代价较高的产物，不该被系统清理工具当成可随意丢弃的临时文件。
 
 ---
 
-### 7.4 MaskGenerator
+### 7.4 Splitter
 
-根据 Depth Map / Subject Mask 生成最终遮挡 Mask。
+根据精修后的深度场，把壁纸拆成前景与背景两张图。**不输出遮罩**（§14.2）。
 
 主要参数：
 
 ```text
-Depth Threshold
-Feather
-Blur Radius
-Subject Priority
-Mask Expansion
-Mask Erosion
+Depth Threshold     归一化深度阈值，0–1（CLI）／百分比（设置页）
+Feather             边缘过渡半宽，0–0.5
 ```
 
-例如：
+流程：
 
 ```text
-Depth < threshold
+Refined Depth (u16)
       ↓
-Foreground
+归一化 → smoothstep(threshold ± feather/2)  得到覆盖度 α
       ↓
-Feather edge
+dilate(α, FILL_DILATE_PIXELS)               得到填充覆盖率
       ↓
-Occlusion Mask
+box_blur_rgb(source, r, 3 passes)           近似高斯，用于填洞
+      ↓
+┌─ foreground: 像素原色 + α 进 alpha        （straight，不预乘）
+└─ background: α<1 处取原色，α=1 处取模糊填充（硬阶跃）
 ```
+
+两个容易被做错的地方，都有回归测试钉住：
+
+- **填充用膨胀后的覆盖率，不是原始 α**。α 在轮廓处是半透明，直接在那里
+  填充会把正在被移除的像素平均进去，沿轮廓留下一圈主体色光晕。
+- **填充按硬覆盖率（α≥1）混合，不按软 α**。理由见 §14.2，
+  软混合会沿羽化边缘把主体留在背景里。
+
+`FILL_BLUR_FRACTION = 0.06`（相对短边）、`FILL_BLUR_PASSES = 3`、
+`FILL_DILATE_PIXELS = 4`。高斯用三次 box blur 近似——单次 box blur 在半径
+尺度上有方块状伪影，三次收敛到真高斯 3% 以内。
+
+> 改这里的任何一步都要 bump `SPLIT_PIPELINE_VERSION`。
 
 ---
 
-### 7.5 SceneRenderer
+### 7.5 Compositor（三个 surface）
 
-负责实时桌面效果。
+负责实时桌面效果。三个 `PanelWindow` 全在 **`bottom` 层**（放 `background`
+会被 DMS 的 Widget 盖住，放 `top` 会盖住普通窗口），按 map 顺序叠，
+由 `DepthDaemon` **分阶段**（stage 0→3）映射。
 
-V1：
+**为什么必须分阶段**：同一组件树里的多个 `PanelWindow` 是同时创建的，
+各自按 Wayland 对象就绪时机**异步 map**，声明顺序不保证等于 compositor
+看到的顺序；多屏时 `Variants` 的 delegate 还会互相交错。
+症状是**前景渲染完全正确却被压在背景之下**——不透明像素处的截图值精确
+等于背景值。因此每个输出一个 `stage`，`stageTimer` 每 32ms 推进一步。
 
 ```text
-Wallpaper
-   ↓
-Widgets
-   ↓
-Foreground Mask Layer
+DepthBackground     background.png        主体被挖掉的场景
+      ↓
+DepthWidgetHost     自研 widget（如时钟）   主体要遮挡的东西
+      ↓
+DepthForeground     foreground.png        主体，最后 map → 压在最上
 ```
+
+`DepthForeground` 是一个纯粹的 `Image`，`DepthBackground` 多一个
+`MultiEffect` 用于 overview 模糊。**没有 `OpacityMask`、没有
+`Qt5Compat.GraphicalEffects` 依赖**（§14.2）。
+
+#### overview 处理
+
+- **背景**：保持 map，按 DMS 自己的参数模糊
+  （`blur: 0.8` / `blurMax: 75` / `autoPaddingEnabled: false`，
+  取自 `WallpaperBackground.qml` 的 `overviewBlurLoader`），
+  使 overview 看起来与没有本插件时一致。`autoPaddingEnabled: false`
+  是必须的——开着会让 effect 撑大 item，切换 overview 时画面会缩放。
+- **widget 与前景**：**隐藏**。`background` 层上不在 backdrop 里的 surface
+  会被复制进 overview 的每个 workspace card，而壁纸是一屏一张，
+  不该重复；用户的要求也只是"overview 里不需要看到人物"。
+- **`inOverview` 从 compositor 轮询**（`niri msg overview-state`，350ms）。
+  `NiriService.inOverview` 在插件上下文里读作常量 `false` 且不报错——
+  插件拿到的 service 树是残缺的。
 
 V2：
 
 ```text
-Wallpaper + Depth
-      ↓
-Depth-aware Parallax
+Background (+ 导航偏移 -s·0.35)
       ↓
 Widgets
       ↓
-Foreground
+Foreground (+ 导航偏移 +s)
 ```
 
 V3：
@@ -595,23 +657,21 @@ Depthscape
 │   └── Cache Size
 │
 ├── AI
-│   ├── Mode
-│   │   ├── Subject
-│   │   ├── Depth
-│   │   └── Hybrid
 │   ├── Backend
 │   └── Model
 │
 ├── Occlusion
 │   ├── Threshold
 │   ├── Feather
-│   ├── Mask Expansion
-│   └── Preview Mask
+│   └── Preview Split
+│
+├── Widgets
+│   ├── Enable
+│   └── Add / Remove
 │
 ├── Parallax
 │   ├── Enable
 │   ├── Strength
-│   ├── Smoothing
 │   └── Max Offset
 │
 ├── Effects
@@ -636,9 +696,12 @@ depthscape/
 ├── plugin.json                 DMS Composite Plugin 清单
 │
 ├── qml/                        Shell 侧（QML / QtQuick）
-│   ├── DepthDaemon.qml         daemon：壁纸监听、任务队列、状态共享、前景 surface 重建
-│   ├── DepthForeground.qml     bottom 层前景 surface（每屏一个，点击穿透）
-│   ├── DepthStatusWidget.qml   desktop：状态卡片（兼作效果演示）
+│   ├── DepthDaemon.qml         daemon：壁纸监听、任务队列、三 surface 分阶段映射
+│   ├── DepthBackground.qml     bottom 层背景 surface（填充图 + overview 模糊）
+│   ├── DepthWidgetHost.qml     bottom 层 widget surface（自研桌面组件）
+│   ├── DepthClockWidget.qml    自研时钟组件
+│   ├── DepthForeground.qml     bottom 层前景 surface（straight alpha，点击穿透）
+│   ├── DepthStatusWidget.qml   desktop：状态卡片
 │   ├── DepthSettings.qml       settings：阈值、羽化、动作按钮
 │   └── StartupCheck.qml        校验引擎二进制是否存在
 │
@@ -652,15 +715,10 @@ depthscape/
 │       ├── imageops.rs         积分图 box_mean、guided filter、smoothstep
 │       ├── depth.rs            ONNX Runtime 推理与归一化
 │       ├── model.rs            模型下载与 SHA-256 校验
-│       └── pipeline.rs         端到端编排：深度 → 精修 → 遮罩
+│       └── pipeline.rs         端到端编排：深度 → 精修 → 拆图
 │
 ├── tools/
-│   ├── make-preview.py         浏览器内的分层预览，免重启 shell 检查效果
-│   └── layer-stacking-test/    同层遮挡与 raise 的集成夹具（见 §14.1）
-│       ├── setup.sh            搭 DMS import 根的符号链接
-│       ├── shell.qml           被测场景：真实前景层 + 早/晚 map 的同层 Widget
-│       ├── probe.py            用遮罩做逐像素假设检验，输出前景/Widget 谁在上
-│       └── README.md           运行步骤与实测数据
+│   └── make-preview.py         浏览器内的分层预览，免重启 shell 检查效果
 │
 └── docs/
     ├── depthscape.md           本文件
@@ -673,9 +731,11 @@ depthscape/
 ```text
 $XDG_DATA_HOME/depthscape/
 ├── models/depth-anything-v2-small/model.onnx
-├── cache/depth/       *.dsc   模型输出，f32，推理分辨率
-├── cache/refined/     *.dsr   精修深度，u16，精修分辨率
-├── cache/masks/       *.png   遮罩，RGBA，细化分辨率
+├── cache/depth/       *.dsc       模型输出，f32，推理分辨率
+├── cache/refined/     *.dsr       精修深度，u16，精修分辨率
+├── cache/split/       *-fg.png    主体，RGBA straight alpha
+│                      *-bg.png    背景，RGB 不透明
+├── widgets.json                   桌面 widget 布局（绕开 savePluginData）
 └── runtime/generate.lock
 ```
 
@@ -693,10 +753,10 @@ $XDG_DATA_HOME/depthscape/
 功能：
 
 - [ ] 监听 DMS 壁纸变化
-- [ ] AI 主体分割
-- [ ] 生成 foreground mask
-- [ ] 缓存 mask
-- [ ] 前景人物遮挡指定桌面 Widget
+- [ ] AI 深度估计（不做主体分割，§14.2）
+- [ ] 拆出前景与背景两张图
+- [ ] 三级缓存 depth / refined / split
+- [ ] 前景主体遮挡指定桌面 Widget
 - [ ] 基础设置页面
 - [ ] 手动重新分析
 - [ ] 清除缓存
@@ -805,18 +865,18 @@ AI inference = 0
 运行时仅保留：
 
 - GPU texture；
-- mask；
+- 前景 / 背景两张图；
 - Shader；
 - 动画；
 - 少量状态更新。
 
-对于 Parallax：
+对于视差：
 
 ```text
-Mouse moving
-→ refresh
+niri 导航事件
+→ 更新累计偏移
 
-Mouse idle
+静止
 → stop / reduce refresh
 ```
 
@@ -831,10 +891,14 @@ Mouse idle
 
 | 场景 | 优化前 | 优化后 |
 |---|---|---|
-| 三级全命中（重复检查） | 112.2 ms | **3.0 ms** |
-| 遮罩未命中（拖滑块） | 236.9 ms | **15.1 ms** |
-| 精修 + 遮罩未命中 | 375.6 ms | 221.3 ms |
-| 全部未命中（冷启动） | 1023.5 ms | 898.9 ms |
+| 三级全命中（重复检查） | 112.2 ms | **3.1 ms** |
+| 拆图未命中（拖滑块） | 236.9 ms | **14.9 ms** |
+| 精修 + 拆图未命中 | 375.6 ms | **~380 ms** |
+| 全部未命中（冷启动） | 1023.5 ms | **893 ms** |
+
+> 拆图比旧的遮罩编码重（要 blur + 编码两张 PNG，实测 `splitMs ≈ 372`），
+> 但滑块路径走的是「精修已命中、只重跑 split」，仍在十几毫秒量级。
+> 冷启动 458 ms 时 `splitCacheHit: false`、`elapsedMs 458` / `splitMs 372`。
 
 三处改动：
 
@@ -844,13 +908,13 @@ Mouse idle
    校验和仍是权威：任何改动或截断都会改变 size 或 mtime，从而强制重算。
 2. **壁纸延迟解码。** 原来为了拿宽高而整张解码，5K 壁纸要 ~60 ms，
    连纯缓存命中也得付。改为只读文件头取宽高（`image_dimensions`），
-   只有真正需要像素的深度/精修两级才解码——而这两级在遮罩命中时根本不跑。
-3. **遮罩按细化分辨率输出。** 遮罩是精修深度场的逐点函数，不可能比它更清晰。
-   原来把它上采样回壁纸分辨率再编码：5K 壁纸下是深度场 **7.1 倍**的像素，
+   只有真正需要像素的深度/精修两级才解码——而这两级在拆图命中时根本不跑。
+3. **拆图按精细化分辨率输出。** 拆图是精修深度场的逐点函数，不可能比它更清晰。
+   原来把遮罩上采样回壁纸分辨率再编码：5K 壁纸下是深度场 **7.1 倍**的像素，
    多出来的全是插值。现按细化分辨率（长边 1920）输出，
-   PNG 从 1.4 MB / 125 ms 降到 277 KB / 8 ms。QML 侧本来就用
-   `PreserveAspectCrop` 缩放到输出，且缩放由 GPU 完成。
-   该改动把 `MASK_PIPELINE_VERSION` 提到 2，旧遮罩自动失效重算。
+   `-fg.png` 实测 2.5 MB / 1920×1080 RGBA，`-bg.png` 1.88 MB / RGB。
+   QML 侧本来就用 `PreserveAspectCrop` 缩放到输出，且缩放由 GPU 完成。
+   该改动把 `SPLIT_PIPELINE_VERSION` 提到 2，旧产物自动失效重算。
 
 剩余成本几乎都在冷启动路径上，且是模型与算法本身：
 深度推理 ~672 ms、guided filter ~147 ms、解码 61 ms。
@@ -867,8 +931,7 @@ Mouse idle
 DisplayState
 ├── wallpaper
 ├── depthMap
-├── subjectMask
-├── occlusionMask
+├── split
 ├── parallaxState
 └── settings
 ```
@@ -903,7 +966,7 @@ Local Cache
 
 - 壁纸原图；
 - 深度图；
-- 人物 Mask；
+- 拆图产物；
 - 用户桌面截图。
 
 如果未来增加在线模型，应明确作为可选功能，并在 UI 中清楚提示数据流向。
@@ -917,11 +980,11 @@ Local Cache
 最核心的问题不是 AI，而是如何稳定实现：
 
 ```text
-Wallpaper
+Wallpaper / Background 层
    ↓
-Foreground Subject
+Desktop Widgets          ← Depthscape 自研，与主体同层，按 map 顺序被压
    ↓
-Desktop Widgets          ← 注意：默认 `background` 层下，Widget 在前景之上
+Foreground Subject       ← 最后 map，压在最上
    ↓
 Normal Application Windows
 ```
@@ -932,10 +995,33 @@ QML 中的 `z: 999` 只对同一个 QtQuick scene / surface 内部有效，
 
 **结论：不需要 patch DMS，靠 layer-shell 的层级 + 同层 map 顺序即可实现。**
 
-> 默认层是 `background`（见下），所以默认的堆叠是
-> `Wallpaper < Foreground < Desktop Widgets < Windows`。
-> 想要 `Wallpaper < Widgets < Foreground < Windows`（前景遮挡 Widget），
-> 把 `backgroundLayer` 关掉即可回到 `bottom` 层，代价是 overview 逐卡片复制。
+> **V0.3 起三个 surface 全在 `background` 层**，不需要任何用户侧 niri 配置。
+> 曾经的 `backgroundLayer` 开关随旧架构一起删除——现在不再是
+> "前景盖不盖 widget"的取舍问题，而是三层各自有序。
+
+#### 同层堆叠：map 顺序，且必须分阶段
+
+**同层内按 map 顺序堆叠，最后 map 的在最上，且 wlr-layer-shell 没有 raise
+请求**——已被 map 上来的 surface 只能通过 unmap + re-map 才能改变顺序。
+
+但**声明顺序不等于 map 顺序**，这是 V0.3 实测到的一条硬约束：
+
+把三个 `PanelWindow` 放在同一组件树里同时创建时，QML 会按各自 Wayland
+对象就绪的时机**异步** map，compositor 看到的顺序因此不确定；多屏时
+`Variants` 的 delegate 还会互相交错。
+
+**症状很有迷惑性**：前景本身渲染完全正确，但被压在背景之下——
+屏幕上只剩填充好的背景，主体完全不可见。此时不透明像素处的截图值
+**精确等于背景值**。
+
+**修法：分阶段 map。** 每个输出维护一个 `stage` 0→3，`stageTimer` 每 32ms
+推进一步，一次只把一个新窗口交给 compositor，顺序因而确定。
+（delegate 自己注册进 `root.surfaceGroups`；不要遍历 `Variants` 的
+`children`——它是 C++ 类型，内部结构不在契约里。）
+
+**排查叠序问题的正确手段**：临时把背景层 `visible` 置 `false`，单独看前景。
+若前景立刻完美渲染，说明前景没问题、是叠序错了。这比读 `niri msg layers`
+快且可信——后者的顺序是**字母序**，不携带任何 z 序信息。
 
 #### 层间顺序
 
@@ -949,8 +1035,8 @@ background  <  bottom  <  top  <  overlay
 
 #### 同层顺序：map 顺序
 
-DMS 的桌面 Widget 落在 **`bottom`** 层，与 depthscape 的前景**同层**，
-因此层间顺序不足以定位两者关系，必须依赖同层排序规则。
+DMS 的桌面 Widget 落在 **`bottom`** 层，与 depthscape 的三个 surface **同层**，
+因此层间顺序不足以定位它们的关系，必须依赖同层排序规则。
 
 **实测结论（niri 26.04 + smithay）：同层内按 map 顺序堆叠，最后 map 的 surface 在最上层。**
 
@@ -977,39 +1063,23 @@ DMS 自己就依赖这条规则，并在源码里写明了 —— `Modules/Deskt
 values: [...(SettingsData.desktopWidgetInstances || [])].reverse()
 ```
 
-#### 由此确定的两条设计约束
+#### 由此确定的设计约束
 
-**1. 前景放在 `background` 层（默认）还是 `bottom` 层。**
+**1. 三个 surface 全在 `bottom` 层。** 放 `background` 会被 DMS 的 Widget 盖住，
+放 `top` / `overlay` 会盖住普通应用窗口。`bottom` 是唯一能让「背景 < widget <
+前景」这条链自洽、又不侵入应用窗口的层级。
 
-这里有一个**取舍**，通过 `backgroundLayer` 设置切换（默认 `true`）：
+> 曾经的 `backgroundLayer` 开关随旧架构一起删除——那是在「前景盖不盖 widget」
+> 之间的取舍，因为当时只有一个 surface。现在三层各自有序，不是取舍问题。
 
-- **`background`（默认）**：niri 只有把 layer surface 视为 **backdrop** 的一部分
-  （overview 中所有 workspace card 共享的那块背景），才不会把它**克隆进每个
-  workspace card**。放在 `background` 上，overview 里整个画面只出现**一次**合成体
-  （人物 + 壁纸），这正是这个插件想要的；代价是 desktop Widget 在 `bottom` 层、
-  **必然盖在前景之上**，前景无法遮挡 Widget。
-- **`bottom`**：前景能盖住 desktop Widget，但 niri 会把它逐 workspace card 复制，
-  overview 里会看到人物在每个卡片里各出现一次。
-
-`top` / `overlay` 两种都不考虑：会盖住普通应用窗口。
-
-> 实测（niri 26.04）：`layer: WlrLayer.Background` 生效后，
-> overview 的 backdrop 里出现的是**完整的合成体**（人物 + 模糊壁纸），
-> 而 workspace card 里是**清晰的合成体**——各一次，没有逐卡片复制。
-> 桌面本体上合成也正常。A/B 截图对比见 `2026-09-20.md`。
-
-**2. 只有在 `bottom` 层才需要抢 map 顺序。**
+**2. 同层内必须抢 map 顺序，且要分阶段。** 见上文「同层堆叠：map 顺序，且必须分阶段」。
 
 `wlr-layer-shell` 没有「raise」请求，唯一手段是销毁并重建 surface
 （`unmap` 会把 surface 从 `LayerMap` 中移除，重新 `map` 即追加到末尾）。
 DMS 在 Widget 列表变化时会重建它自己的全部 Widget surface，
-届时 `bottom` 层上的 depthscape 前景会被压在后面，因此 `DepthDaemon` 监听
+届时 `bottom` 层上的 depthscape surface 会被压在后面，因此 `DepthDaemon` 监听
 `SettingsData.desktopWidgetInstances`，等 DMS 自己的去抖（150ms + 32ms）结束后
-再重建前景 surface。
-
-**在 `background` 层上这套机制完全不必要**——Widget 在 `bottom`，是严格更高的层，
-层内 map 顺序再怎么变也压不到我们上面。`raiseForeground()` 因此在
-`backgroundLayer` 为真时**直接返回**，避免无谓的重建闪烁。
+再重建整组 surface。
 
 **但 `desktopWidgetInstances` 不是唯一的触发条件。** 读
 `DesktopWidgetLayer.qml` 可以看到它有两个去抖入口：
@@ -1020,7 +1090,7 @@ onPluginReadyKeyChanged: rebuildDebounce.restart()   // 插件的桌面组件加
 ```
 
 `pluginReadyKey` 派生自 `PluginService.pluginDesktopComponents`。
-**这条在 shell 每次启动时都必然发生，而且发生在本插件 daemon 映射前景之后**
+**这条在 shell 每次启动时都必然发生，而且发生在本插件 daemon 映射 surface 之后**
 ——于是 Widget 会压在前景上，用户看到的效果就是「没生效」。
 这个 bug 只有在真实会话里装上插件才会暴露，夹具（三个 surface 同一时刻创建）
 测不出来。
@@ -1034,23 +1104,23 @@ Connections {
 }
 
 // 兜底：上面那条信号可能在本 daemon 构造之前就发过了，
-// 冷启动时首个遮罩也可能晚于它。延迟再顶一次，两种情况都覆盖。
+// 冷启动时首个拆图也可能晚于它。延迟再顶一次，两种情况都覆盖。
 Timer { interval: 3000; running: true; repeat: false
-        onTriggered: root.raiseForeground() }
+        onTriggered: root.raiseSurfaces() }
 ```
 
-兜底是无害的：如果前景尚未 map，`raiseForeground()` 是空操作；
-而遮罩就绪时 surface 自然会最后 map、因而在最上。
+兜底是无害的：如果 surface 尚未 map，`raiseSurfaces()` 是空操作；
+而拆图就绪时 surface 自然会最后 map、因而在最上。
 
-日常主路径不需要额外处理：换壁纸时 `maskPath` 先被清空、前景 surface 被
-unmap，新遮罩就绪后重新 map，自然处于最上层。
+日常主路径不需要额外处理：换壁纸时 `foregroundPath` 先被清空、当前
+`stageTimer` 会重跑一轮，新图就绪后重新 map，自然处于最上层。
 
 时间预算：DMS 在 `orderSignature` 变化后先等 `rebuildDebounce` 150ms、
 再等 `rebuildApply` 32ms 才把 `rebuilding` 置回 `false`，其新 surface
-大约在 182ms 时 map；depthscape 等到 400ms 再动，加自身 32ms 去抖，
-约 432ms 时 map。两者都由同一个属性变更信号触发，因此**顺序是常量保证的**，
-不依赖调度时序。取 400ms 而非贴着实测值，是为了给 Qt 创建 surface
-留出余量。
+大约在 182ms 时 map；depthscape 等到 400ms 再动，加自身分阶段映射
+（3 步 × 32ms ≈ 96ms），约 496ms 时最后一个 surface 落地。两者都由同一个
+属性变更信号触发，因此**顺序是常量保证的**，不依赖调度时序。
+取 400ms 而非贴着实测值，是为了给 Qt 创建 surface 留出余量。
 
 #### 点击穿透
 
@@ -1063,153 +1133,111 @@ mask: Region {}          // 空输入区域 = 完全点击穿透
 `Region {}`（不含 `item`）即空输入区域。这与 DMS 自身用法一致
 （`DesktopPluginWrapper.qml` 的 `emptyMask` 与桌面 Widget 网格覆盖层）。
 
-#### 实测记录一：纯色探针
+#### 实测记录：叠序与视觉确认（2026-09-20）
 
-在真实 niri 会话中，用一个独立的 Quickshell 实例（`qs -p`，不影响运行中的 DMS）
-放两个**同层重叠**的纯色 surface，再用 `niri msg action screenshot-screen --path`
-截图取重叠区像素：
+**隔离手段**：把 `showBackground` 临时置 `false`，单独看前景。前景立刻
+完美渲染（`(1250,1000)` → `(8,5,42)`，正是前景自己的颜色）→ 证明前景本身
+没问题，是叠序错了。分阶段 map 落地后重新验证：
 
-| 实验  | map 顺序                   | 重叠区颜色   | 结论                  |
-| --- | ------------------------ | ------- | ------------------- |
-| 1   | A(红) → B(蓝)              | 蓝       | 后 map 者在上           |
-| 2   | A(红) → B(蓝) → A 重 map    | 红       | 重建 surface 可把前景顶到最上 |
-| 3   | A、B 均用 `mask: Region {}` | 两者均正常渲染 | 空掩码不影响渲染，仅清空输入区域    |
+- **8/8 采样点精确匹配**：α=255 处截图值 == 前景色 `(8,5,42)`；
+  α=0 处 == 背景色 `(173,12,43)`。
+- **背景泄漏仅 0.2%**：主体区 90.1% 的像素可解释为前景色或某个**邻居前景像素**
+  （亚像素采样）；剩余部分主要是 DMS 自带时钟压在主体之上。
+- **时钟遮挡**：时钟框内 403 个被主体覆盖的采样点，**0 个**仍露出时钟粉色。
+- **视觉**：Itachi/crow 剪影实心不透明；`0:05:17` 被电线杆干净切断后从
+  另一侧重现；暗红天空与白月亮处**无接缝**。
 
-实验 1 的对照点：A 独占区（1000,600）为红、B 独占区（1400,1000）为蓝，
-确认几何无误后重叠区（1200,800）取到蓝色。
+> **判据不能用「不透明处 == 前景色」这种单点断言**。DMS 自己的 clock 在
+> `bottom` 层画在主体之上，大号数字处会假阳性（实测 `(1198,532)` 期望
+> `(2,4,41)` 实得 `(255,179,181)`）。正确判据是「等于前景色**或某个邻居
+> 前景像素**」，再单独断言没有任何像素等于背景色。
+> 区分背景泄漏与时钟覆盖看色相：天空是 `(173,12,43)` **暗红**，
+> 时钟是 `(255,179,181)` **浅粉**/白，一亮一暗。
 
-实验用 surface 放在 `top` 层而非 `bottom`：同层排序规则来自同一个
-`LayerMap` 插入序集合、与具体层无关，而 `top` 层不会被应用窗口遮挡，
-因此结论可直接套用到 `bottom`。
-
-> `niri msg layers` 的输出顺序**不能**用来判断 z 序。它是 `LayerMap` 的
-> 原始迭代顺序，实验 1 与实验 2 中该顺序相同，但实际最上层相反。
-
-#### 实测记录二：真实前景层 + 同层 Widget 端到端
-
-纯色探针只验证了机制本身。真正的判据是：**加载真实的
-`DepthDaemon.qml` / `DepthForeground.qml`，让它们在真实遮罩下与同层
-Widget 相遇**，再用遮罩做逐像素假设检验。
-
-夹具见 `tools/layer-stacking-test/`（`setup.sh` 搭符号链接、`shell.qml`
-是被测场景、`probe.py` 出结论）。场景：`W1` 洋红 400×400 先 map；
-真实 `DepthDaemon` 随后 map 全屏前景；`W2` 青色 400×400 在 t=14s 才 map，
-用来模拟 DMS 重建 Widget。
-
-判据不看单点，而是在整块 400×400 上比较两个竞争假设：
-
-```text
-H_fg      alpha * wallpaper + (1 - alpha) * widget_color
-H_widget  widget_color
-```
-
-平均绝对误差（0..255）低者胜。正确合成时胜者约 1、败者约 100。
-
-| 状态            | W2（遮罩不透明区）                                             | W1（遮罩透明区，对照组）             |
-| ------------- | ------------------------------------------------------ | ------------------------- |
-| 重建后（bug）      | MAE[前景在上] 104.32 / MAE[Widget 在上] **0.00** → Widget 在上 | MAE[前景在上] **0.63** → 前景在上 |
-| `raise` 后（修复） | MAE[前景在上] **1.08** / MAE[Widget 在上] 104.35 → 前景在上      | MAE[前景在上] **0.63** → 前景在上 |
-
-`W2` 的 0.00 表示整块面板像素级纯青——晚 map 的 Widget 完全压在前景之上，
-bug 真实存在。`raise` 之后同一块面板与遮罩模型吻合到 1.08/255；
-面板左下角残留的青色楔形正是遮罩在那里确实透明，不是失败：
-该矩形内 alpha < 0.05 的像素占 **21.76%**、alpha < 0.5 的占 26.21%，
-而观测到的纯青像素占 23.74%——落在两者之间，差值正是半透明的过渡带。
-`W1` 两次数值完全相同，说明对照组不受影响，也说明测量本身没有漂移。
-
-其它同步验证：
-
-- 连续两次 `raise` 后 `niri msg layers` 每个输出仍**恰好一个**
-  `dms:plugins:depthscape-foreground`，`Loader` 的销毁重建不泄漏 surface；
-- 整个 raise 周期日志无 QML 报错、无绑定循环告警；
-- `raise` 调用到新 surface 落地的延迟落在 114–153ms 之间：114ms 时采到的仍是
-  旧状态、153ms 时已是新状态。这个数字与 DMS 自身的 150ms 去抖同量级，
-  但**不影响正确性**——顺序由前面那组常量保证，不由绝对延迟保证。
+> 截图必须**每次确认输出**：`focus-monitor-left` 在截图动作本身会挪焦点，
+> 本轮曾在 DP-3 上按 DP-1 坐标验证，得到「0% 匹配」的垃圾结论。
+> 3840×2160 = DP-1，2560×1440 = DP-3。
 
 #### 仍需确认
 
 - Hyprland / Sway 是否同样按 map 顺序堆叠（两者都基于 smithay，
-  预期一致，但未实测）；
-- 若某个合成器不把普通窗口放在 `bottom` 与 `top` 之间，
-  退化方案是向 DMS 上游提案一个 `setWallpaperMask` 风格的 API，
-  而不是改用 `top` 层——那会盖住窗口，属于不可接受的降级；
-- `SettingsData.desktopWidgetInstancesChanged` → 400ms 定时器 → 重建前景
+  预期一致，但未实测；`plugin.json` 的 `compositors` 目前只声明 `["niri"]`）；
+- `SettingsData.desktopWidgetInstancesChanged` → 400ms 定时器 → 重建 surface
   这条**触发链路**尚未在真实 DMS 会话中跑到：用户当前的
   `desktopWidgetInstances` 全部 `enabled: false`，要触发就得改动其配置。
-  已单独验证的两端是「信号本身存在且带变更通知」（`SettingsData.qml`
-  `property var desktopWidgetInstances: []`）与「`raiseForeground()` 确实
-  能把前景顶到最上」（上表）。
+- 多显示器逐像素验证（目前只在 DP-1 上做过完整的像素级判据）。
 
 ---
 
-### 14.2 遮罩合成
+### 14.2 拆图：为什么必须输出两张图
 
-前景层的渲染只有一步：把壁纸按遮罩的 alpha 合成出来。这一步在 Qt6 里
-有两种写法，而**只有一种能用**。
+**只输出遮罩在数学上不可能产生遮挡效果。** 这是整个项目最重要的一条结论。
 
-`MultiEffect` 是 DMS 内部使用的方案，两种用法都试过：
+设遮罩覆盖度为 `α`，DMS 自己画的壁纸为 `W`。前景 surface 做的是
+`α·W + (1-α)·底下`，而"底下"就是**同一张 `W`**：
 
-```qml
-// 写法 A：作为 layer.effect
-Item {
-    layer.enabled: true
-    layer.effect: MultiEffect { maskEnabled: true; maskSource: maskImage }
-    Image { anchors.fill: parent; source: wallpaper }
-}
-
-// 写法 B：作为独立可见项（DMS BackdropBlur.qml 的形状）
-MultiEffect { source: wallpaperImage; maskEnabled: true; maskSource: maskImage }
+```text
+α·W + (1-α)·W ≡ W
 ```
 
-在 63 个「遮罩 alpha ≈ 255、必须显示壁纸」的采样点上，
-两种写法都只有 35 点正确，**28 点露出了本应被遮住的底色**。
+主体区域像素完全一致，**画与不画没有区别**。实测：把遮罩对
+`α·W + (1-α)·DMS壁纸` 重新合成，与纯壁纸的全屏 MAE 是 **2.19**，
+差异只出现在顶栏和时钟文字这些**我们自己画的东西**上——不是主体
+（α>0.95 的像素只占 6.2%，其 MAE 3.78；α<0.05 的占 92.9%，MAE 2.07）。
 
-原因是 `layer.enabled: true` 作用在**不可见**的 `Image` 上时，
-不保证产生并及时更新 layer 纹理：遮罩是一张 PNG（实测时为 5120×2880，
-现在按细化分辨率输出，见 §11），解码需要时间，而 `visible: false`
-的项不会重绘，纹理就停在过期状态。
-DMS 的 `BackdropBlur` 之所以没踩到这个坑，是因为它的 `maskSource` 是一个
-`Rectangle`（瞬时绘制，无异步加载），`source` 则来自 `ShaderEffectSource`。
+所以引擎输出的是**一对图**：
 
-`OpacityMask` 内部维持源的活性，在同一 fixture 上 **63/63 正确**：
+| 文件 | 格式 | 内容 |
+|---|---|---|
+| `-fg.png` | **straight-alpha** RGBA | 主体原色 + 覆盖度在 alpha 通道 |
+| `-bg.png` | RGB（不透明） | 同一场景，主体区域被**模糊填充** |
 
-```qml
-Image {
-    id: wallpaperImage
-    anchors.fill: parent
-    source: "file://" + root.wallpaperPath
-    fillMode: Image.PreserveAspectCrop
-    visible: false
-    layer.enabled: true
-}
+`DepthBackground` 画后者、`DepthWidgetHost` 画中间的 widget、
+`DepthForeground` 画前者，三层都在 `bottom` 层按 map 顺序叠。
 
-Image {
-    id: maskImage
-    anchors.fill: parent
-    source: "file://" + root.maskPath
-    fillMode: Image.PreserveAspectCrop
-    visible: false
-    layer.enabled: true
-}
+#### 两个必须遵守的约定
 
-OpacityMask { anchors.fill: parent; source: wallpaperImage; maskSource: maskImage }
+**1. 前景是 straight alpha，不是预乘。**
+
+消费者是 QML 的 `Image`，它采样 straight-alpha 源并**自己乘一次 alpha**。
+发预乘数据会让 alpha 被应用两次，主体渲染成半透明——
+后面的时钟透过轮廓可见。这是实测到的，症状是时钟数字的粉色渗进主体。
+
+判别方法：**透明像素的 RGB 是否为 0**。预乘是 0，straight 不是。
+
+**2. 背景的填充必须用硬覆盖率，不能用软 alpha。**
+
+straight alpha 下合成式是 `α·C_fg + (1-α)·C_bg`，而 `C_fg = C_src`，代入
+要求合成结果等于原图：
+
+```text
+α·C_src + (1-α)·C_bg = C_src   =>   C_bg = C_src   （对一切 α < 1）
 ```
 
-代价是新增一个 DMS 自身不使用的依赖 `Qt5Compat.GraphicalEffects`
-（Arch 系 `qt6-5compat`，Debian/Ubuntu `qml6-module-qt5compat-graphicaleffects`）。
-在没有该模块的机器上，`import` 会让整个前景组件加载失败，
-因此 `StartupCheck.qml` 会在启用插件前直接拦住并给出安装提示。
+**`α < 1` 时背景值是被强制的**，只有 `α = 1` 时方程退化——前景完全覆盖，
+背景取任何值都不影响结果。**那个自由度才是拆图的意义**：把模糊填充藏在
+不透明的主体下面。
 
-两个源 `Image` 都**不开** `asynchronous`：同步解码会在换壁纸时带来一次短暂的
-主线程停顿（5120×2880 的 JPEG + PNG），但异步加载会让纹理在解码完成前就被取用，
-而这正是上面那类问题的来源。停顿发生在换壁纸这一个低频动作上，可以接受；
-正确性优先。
+若改用软 alpha 混合填充，就会沿羽化边缘把主体留在背景里，合成时主体被
+**加到自己身上**，实测 α=0.5 处漂移 **37/255**，表现为沿轮廓一圈亮色光晕。
+回归测试 `the_background_never_retains_the_subject_under_a_soft_edge`
+用的激励**必须是软渐变**——硬边缘上 α 只有 0/1，两种公式完全重合，测不出来。
 
-> 另一条被否掉的路：让引擎直接输出「壁纸 RGB + 覆盖度 alpha」的成品 PNG，
-> QML 侧只剩一个 `Image`，可完全绕开遮罩。但同一张 5120×2880 的壁纸，
-> 成品 PNG 是 **27 MB**，而纯遮罩只有 **277 KB**（遮罩的 RGB 是纯白，
-> 压缩率极高）。且每次拖动滑块都要重新编码整张成品图，而遮罩路径实测只要
-> 8 ms。故不采用。
+#### 被否掉的历史方案
+
+- **`MultiEffect` + 遮罩**：在 63 个"必须显示壁纸"的采样点上只有 35 点正确，
+  28 点露出底色。原因是 `layer.enabled` 作用在不可见 `Image` 上时纹理更新
+  不可靠。`OpacityMask` 在同一夹具上 63/63 正确，但它来自
+  `Qt5Compat.GraphicalEffects`——一个 DMS 自身不使用的模块，等于给所有用户
+  加一个系统依赖。拆图方案下两者都不需要了。
+- **引擎直接输出成品图（壁纸 RGB + alpha）**：同一张 5120×2880 壁纸，
+  成品 PNG 是 **27 MB**，纯遮罩只有 277 KB。但这个反对理由在拆图方案下
+  已经失效——现在输出的是降采样后的 1920×1080，`-fg.png` **2.5 MB**、
+  `-bg.png` **1.88 MB**，且 `-bg` 用 RGB 而非 RGBA 又省掉四分之一。
+- **`place-within-backdrop`**：把 surface 塞进 backdrop 最底层，
+  被同在 backdrop 的 DMS 壁纸和 overview blur 完全盖住（实测 0.0%）。
+  且必须由 niri `layer-rule` 按 namespace 显式开启。**本架构不开它，
+  也因此不需要任何用户侧 niri 配置。**
 
 ---
 
@@ -1220,7 +1248,7 @@ OpacityMask { anchors.fill: parent; source: wallpaperImage; maskSource: maskImag
 - 锯齿；
 - 白边；
 - 过度遮挡；
-- Mask 抖动。
+- 边缘闪烁。
 
 需要通过：
 
@@ -1231,7 +1259,8 @@ Erode / Dilate
 Edge Refinement
 ```
 
-改善效果。
+改善效果。当前实现走的是 `smoothstep` 羽化 + `dilate` + 硬覆盖率填充
+（§7.4），**guided filter 是边缘质量的主要来源**（radius 8, epsilon 0.001）。
 
 ---
 
@@ -1249,8 +1278,7 @@ AI Depth 可能无法正确判断：
 
 ```text
 threshold
-mask
-foreground region
+feather
 ```
 
 不能完全依赖自动结果。
@@ -1312,7 +1340,8 @@ FileView {
 
 **不要改用 `savePluginData` 传递状态。** 它写进 `plugin_settings.json`，
 会触发 `pluginDataChanged`；而 daemon 自己也监听该信号并调用
-`syncParameters()` 使全部遮罩失效——两边一连就是死循环。
+`syncParameters()` 使全部拆图失效——两边一连就是死循环。
+widget 布局因此改存 `$XDG_DATA_HOME/depthscape/widgets.json`。
 
 > 教训：夹具能证明**机制**，不能证明**集成**。
 > 夹具里 `pluginService` 是完整单例，真实会话里是精简包装；
@@ -1385,9 +1414,9 @@ Complex Shader
 ```text
 1. 能否正确监听 DMS 壁纸变化？
 
-2. 能否稳定生成并缓存人物 Mask？
+2. 能否稳定生成并缓存前景/背景两张图？
 
-3. 能否让人物前景正确遮挡desktop Widget？
+3. 能否让前景主体正确遮挡 desktop Widget？
 ```
 
 只要这三个问题打通，项目的核心技术路径就成立。
@@ -1401,13 +1430,13 @@ Complex Shader
 ```text
 选择壁纸
     ↓
-自动人物分割
+深度估计（不分割）
     ↓
-生成 Mask
+拆出 foreground / background
     ↓
 Clock Widget
     ↓
-人物遮挡 Clock
+主体遮挡 Clock
 ```
 
 用户最终只需要看到：

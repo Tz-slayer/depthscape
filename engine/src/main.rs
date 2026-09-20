@@ -1,4 +1,4 @@
-//! `depthscape-engine` — offline depth/mask producer for the Depthscape plugin.
+//! `depthscape-engine` — offline depth and split producer for the Depthscape plugin.
 //!
 //! One invocation does one job and prints one JSON object. The engine never
 //! renders and never talks to the compositor; it only turns a wallpaper into
@@ -21,7 +21,7 @@ use std::path::PathBuf;
 #[command(
     name = "depthscape-engine",
     version,
-    about = "Generate depth-aware occlusion masks for Depthscape"
+    about = "Split wallpapers into a depth-cut foreground and a filled background"
 )]
 struct Cli {
     /// Plugin data directory. Defaults to $XDG_DATA_HOME/depthscape.
@@ -44,7 +44,7 @@ enum Command {
         force: bool,
     },
 
-    /// Analyse a wallpaper and emit an occlusion mask.
+    /// Analyse a wallpaper and emit the foreground/background pair.
     Analyze {
         #[arg(long, value_name = "PATH")]
         wallpaper: PathBuf,
@@ -59,7 +59,7 @@ enum Command {
         feather: f32,
     },
 
-    /// Delete every cached depth map and mask.
+    /// Delete every cached depth map, refined field, and split pair.
     ClearCache,
 }
 

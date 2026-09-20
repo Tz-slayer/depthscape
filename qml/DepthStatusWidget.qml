@@ -6,10 +6,12 @@ import qs.Widgets
 
 // Desktop status tile.
 //
-// Doubles as a live demonstration: this widget renders on the same layer-shell
-// layer as the foreground surface (`bottom`), and the foreground is re-mapped
-// after this widget is built, so the wallpaper's near scenery passes in front
-// of this tile whenever the effect is active. See `docs/depthscape.md` §14.1.
+// Doubles as a live demonstration: this widget is a DMS desktop widget, so it
+// sits on the `bottom` layer, which layer-shell orders above the `background`
+// layer the Depthscape surfaces occupy. It therefore always stays in front of
+// the subject — the opposite of Depthscape's own widgets, which are mapped
+// between the background and the foreground and are occluded by it. Comparing
+// the two is the quickest way to see that the effect is working.
 Item {
     id: root
 

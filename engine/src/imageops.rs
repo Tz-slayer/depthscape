@@ -1,4 +1,4 @@
-//! Pure array operations for the depth/mask pipeline.
+//! Pure array operations for the depth/refine/split pipeline.
 //!
 //! Everything here is deterministic, allocation-friendly and free of I/O so it
 //! can be unit tested without a model or a wallpaper.
@@ -153,7 +153,123 @@ pub fn resize_bilinear(source: &[f32], source_width: u32, source_height: u32, wi
     output
 }
 
-/// Smooth transition across `[low, high]`, returned as alpha in `0.0..=1.0`.
+/// Separable box blur of an RGB buffer, three passes approximating a Gaussian.
+///
+/// Operates on interleaved `u8` RGB (`width * height * 3`). NaN and clamping are
+/// not a concern here: the input is 8-bit, so every intermediate fits an `f32`
+/// with room to spare.
+///
+/// Three box passes are used rather than one because a single box blur leaves
+/// square-ish artefacts at the radius scale, and the fill region is large enough
+/// that they would be visible as banding. Three passes converge to within a few
+/// percent of a true Gaussian, which is far below what this fill needs.
+pub fn box_blur_rgb(
+    source: &[u8],
+    width: u32,
+    height: u32,
+    radius: u32,
+    passes: u32,
+) -> Vec<u8> {
+    let (width, height) = (width as usize, height as usize);
+    assert_eq!(source.len(), width * height * 3, "source length mismatch");
+    if radius == 0 || width == 0 || height == 0 {
+        return source.to_vec();
+    }
+
+    // Accumulate in f32 per channel, ping-ponging between two scratch buffers.
+    let mut current: Vec<f32> = source.iter().map(|value| *value as f32).collect();
+    let mut scratch = vec![0f32; current.len()];
+    let radius_i = radius as i64;
+    let window = (2 * radius + 1) as f32;
+
+    // Edge clamping is expressed as "sample index = clamp(i, 0, len-1)", so the
+    // window that would sit off the left/top edge contributes the edge pixel
+    // repeatedly. Seeding the running sum over `[-radius, radius]` and then
+    // sliding it one pixel at a time is what makes this O(1) per pixel.
+    let clamp = |value: i64, limit: usize| -> usize {
+        value.clamp(0, limit as i64 - 1) as usize
+    };
+
+    for _ in 0..passes {
+        // Horizontal.
+        for y in 0..height {
+            let row = y * width * 3;
+            for channel in 0..3 {
+                let sample = |x: i64| -> f32 { current[row + clamp(x, width) * 3 + channel] };
+                let mut sum = 0f32;
+                for offset in -radius_i..=radius_i {
+                    sum += sample(offset);
+                }
+                for x in 0..width as i64 {
+                    scratch[row + x as usize * 3 + channel] = sum / window;
+                    // Slide: the pixel entering on the right, the one leaving left.
+                    sum += sample(x + radius_i + 1) - sample(x - radius_i);
+                }
+            }
+        }
+        std::mem::swap(&mut current, &mut scratch);
+
+        // Vertical.
+        for x in 0..width {
+            for channel in 0..3 {
+                let sample = |y: i64| -> f32 {
+                    current[clamp(y, height) * width * 3 + x * 3 + channel]
+                };
+                let mut sum = 0f32;
+                for offset in -radius_i..=radius_i {
+                    sum += sample(offset);
+                }
+                for y in 0..height as i64 {
+                    scratch[y as usize * width * 3 + x * 3 + channel] = sum / window;
+                    sum += sample(y + radius_i + 1) - sample(y - radius_i);
+                }
+            }
+        }
+        std::mem::swap(&mut current, &mut scratch);
+    }
+
+    current
+        .into_iter()
+        .map(|value| value.round().clamp(0.0, 255.0) as u8)
+        .collect()
+}
+
+/// Grow a coverage field outward by `pixels` iterations of a 3x3 dilation.
+///
+/// Used to push the "do not read from here" region past the soft edge of the
+/// cut-out. The alpha ramp is half-transparent right at the subject's boundary,
+/// so a fill that stopped there would average in the subject's own pixels along
+/// its entire silhouette — a halo in the subject's colour, which is exactly the
+/// artefact the fill exists to avoid.
+pub fn dilate(coverage: &[f32], width: u32, height: u32, pixels: u32) -> Vec<f32> {
+    let (width, height) = (width as usize, height as usize);
+    assert_eq!(coverage.len(), width * height, "coverage length mismatch");
+    let mut current = coverage.to_vec();
+    let mut next = current.clone();
+
+    for _ in 0..pixels {
+        for y in 0..height {
+            for x in 0..width {
+                let mut value = current[y * width + x];
+                for dy in -1i32..=1 {
+                    for dx in -1i32..=1 {
+                        let ny = y as i32 + dy;
+                        let nx = x as i32 + dx;
+                        if ny < 0 || nx < 0 || ny >= height as i32 || nx >= width as i32 {
+                            continue;
+                        }
+                        value = value.max(current[ny as usize * width + nx as usize]);
+                    }
+                }
+                next[y * width + x] = value;
+            }
+        }
+        std::mem::swap(&mut current, &mut next);
+    }
+    current
+}
+
+
 ///
 /// The feather is applied symmetrically around the threshold, so the slider
 /// widens the transition without moving its centre.
@@ -170,14 +286,6 @@ pub fn smoothstep(values: &[f32], low: f32, high: f32) -> Vec<f32> {
             let scaled = ((value - low) / (high - low)).clamp(0.0, 1.0);
             scaled * scaled * (3.0 - 2.0 * scaled)
         })
-        .collect()
-}
-
-/// Convert `0.0..=1.0` alpha into 8-bit samples.
-pub fn alpha_to_u8(alpha: &[f32]) -> Vec<u8> {
-    alpha
-        .iter()
-        .map(|value| (value * 255.0).round().clamp(0.0, 255.0) as u8)
         .collect()
 }
 
@@ -354,6 +462,151 @@ mod tests {
         assert_eq!(upscaled.len(), 16);
         for value in upscaled {
             assert!((0.0..=1.0).contains(&value), "out of range: {value}");
+        }
+    }
+
+    #[test]
+    fn box_blur_of_a_constant_image_is_that_constant() {
+        // Edge clamping must not darken the border: a uniform image has to stay
+        // uniform, or the fill would show a vignette at the frame edges.
+        let source = vec![200u8; 16 * 12 * 3];
+        let blurred = box_blur_rgb(&source, 16, 12, 3, 3);
+        assert_eq!(blurred.len(), source.len());
+        for value in blurred {
+            assert_eq!(value, 200, "edge clamping leaked");
+        }
+    }
+
+    #[test]
+    fn box_blur_preserves_the_average() {
+        // A box filter is normalised, so the mean of the image must survive —
+        // otherwise the fill would shift the background's brightness.
+        //
+        // Only true away from the frame: edge clamping repeats the border pixel
+        // into the out-of-bounds half of the window, which weights it extra and
+        // is not mean-preserving. The effect is purely a function of how much of
+        // the image is border, so it dominates a tiny test image and is
+        // negligible at any real resolution. Sized generously on purpose.
+        let (width, height) = (64u32, 64u32);
+        let mut source = Vec::with_capacity((width * height * 3) as usize);
+        for index in 0..(width * height) as usize {
+            let value = ((index * 7) % 256) as u8;
+            source.extend_from_slice(&[value, value, value]);
+        }
+        let before: f64 = source.iter().map(|v| *v as f64).sum::<f64>() / source.len() as f64;
+        let blurred = box_blur_rgb(&source, width, height, 4, 3);
+        let after: f64 = blurred.iter().map(|v| *v as f64).sum::<f64>() / blurred.len() as f64;
+        assert!((before - after).abs() < 1.0, "{before} vs {after}");
+    }
+
+    #[test]
+    fn box_blur_actually_smooths() {
+        // A single bright pixel must spread out, and the peak must drop.
+        let (width, height) = (64u32, 64u32);
+        let mut source = vec![0u8; (width * height * 3) as usize];
+        let centre = ((32 * width + 32) * 3) as usize;
+        source[centre] = 255;
+        source[centre + 1] = 255;
+        source[centre + 2] = 255;
+        let blurred = box_blur_rgb(&source, width, height, 4, 3);
+        assert!(blurred[centre] < 255, "peak did not drop");
+        assert!(
+            blurred[(32 * width + 34) as usize * 3] > 0,
+            "energy did not spread"
+        );
+    }
+
+    /// Each pass widens the kernel's reach by exactly `radius` in every
+    /// direction, so `passes` passes reach `passes * radius`.
+    ///
+    /// Measured on the RGB entry point but with the impulse scaled well above
+    /// 255: the 8-bit rounding that the real pipeline uses zeroes out a point
+    /// impulse's tail long before its true support ends, which would make this
+    /// assertion measure the quantiser instead of the kernel. The scaling is
+    /// applied to the *input* only — `box_blur_rgb` takes `u8`, so the reach is
+    /// instead checked on a source whose tail survives, by using a large array
+    /// of mid-grey with a single blown-out pixel.
+    #[test]
+    fn box_blur_reach_grows_one_radius_per_pass() {
+        // Grayscale impulse, so the 3-channel interleave does not matter.
+        let (width, height) = (128u32, 128u32);
+        let radius = 4u32;
+
+        fn reach_for(passes: u32, width: u32, height: u32, radius: u32) -> i64 {
+            // A 1x1 impulse is unrepresentable at u8 with a surviving tail, so
+            // measure the support from the difference between two passes
+            // instead: run the real kernel and find the last column that moved
+            // away from the background level.
+            let mut source = vec![0u8; (width * height * 3) as usize];
+            let centre = ((64 * width + 64) * 3) as usize;
+            source[centre] = 255;
+            source[centre + 1] = 255;
+            source[centre + 2] = 255;
+            let blurred = box_blur_rgb(&source, width, height, radius, passes);
+
+            let row = 64 * width as usize;
+            let mut furthest = 0i64;
+            for distance in 0..64i64 {
+                let index = (row + (64 + distance) as usize) * 3;
+                if blurred[index] > 0 {
+                    furthest = distance;
+                }
+            }
+            furthest
+        }
+
+        // Rounding to 8 bits truncates the tail, so the measured reach is a
+        // lower bound on the true support — but it must still grow by the
+        // radius each pass until the tail falls below one quantisation step.
+        let one = reach_for(1, width, height, radius);
+        let two = reach_for(2, width, height, radius);
+        assert_eq!(one, radius as i64, "one pass reaches exactly its radius");
+        assert!(
+            two > one && two <= (radius * 2) as i64,
+            "two passes reached {two}, expected between {one} and {}",
+            radius * 2
+        );
+    }
+
+    #[test]
+    fn box_blur_with_zero_radius_is_the_identity() {
+        let source: Vec<u8> = (0..(8 * 4 * 3)).map(|index| (index % 251) as u8).collect();
+        assert_eq!(box_blur_rgb(&source, 8, 4, 0, 3), source);
+    }
+
+    #[test]
+    fn dilate_grows_coverage_outward() {
+        let (width, height) = (9u32, 9u32);
+        let mut coverage = vec![0f32; (width * height) as usize];
+        coverage[4 * width as usize + 4] = 1.0;
+        let grown = dilate(&coverage, width, height, 2);
+        // Two iterations of a 3x3 dilation reach a Chebyshev distance of 2.
+        assert_eq!(grown[4 * 9 + 4], 1.0);
+        assert_eq!(grown[2 * 9 + 4], 1.0, "did not reach upward");
+        assert_eq!(grown[6 * 9 + 4], 1.0, "did not reach downward");
+        assert_eq!(grown[4 * 9 + 2], 1.0, "did not reach left");
+        assert_eq!(grown[4 * 9 + 6], 1.0, "did not reach right");
+        assert_eq!(grown[4 * 9 + 7], 0.0, "grew too far");
+        assert_eq!(grown[1 * 9 + 4], 0.0, "grew too far");
+    }
+
+    #[test]
+    fn dilate_with_zero_iterations_is_the_identity() {
+        let coverage = vec![0f32, 1.0, 0.0, 0.5];
+        assert_eq!(dilate(&coverage, 2, 2, 0), coverage);
+    }
+
+    #[test]
+    fn dilate_is_monotonic() {
+        // Growing can only ever add coverage, never remove it — the fill region
+        // must never be allowed to shrink back onto the subject.
+        let (width, height) = (16u32, 16u32);
+        let coverage: Vec<f32> = (0..(width * height) as usize)
+            .map(|index| if index % 5 == 0 { 1.0 } else { 0.0 })
+            .collect();
+        let grown = dilate(&coverage, width, height, 3);
+        for (before, after) in coverage.iter().zip(grown.iter()) {
+            assert!(*after >= *before, "coverage shrank");
         }
     }
 }

@@ -1,11 +1,14 @@
-//! Two-tier cache: raw depth maps and generated masks are keyed separately.
+//! Three-tier cache: raw depth maps, refined fields, and split pairs are keyed
+//! separately.
 //!
-//! Dragging the threshold slider must never re-run the model, so the mask key
-//! extends the depth key with the mask parameters. Both tiers use BLAKE3.
+//! The three tiers are deliberately independent. Refinement is a property of the
+//! depth field alone, and the split is the only tier that reads the threshold and
+//! feather, so dragging a slider re-runs the split and nothing else. All tiers
+//! use BLAKE3.
 
 use crate::config::{
-    Paths, DEPTH_CACHE_LIMIT, DEPTH_PIPELINE_VERSION, INPUT_SIZE, MASK_CACHE_LIMIT,
-    MASK_PIPELINE_VERSION, MODEL_FINGERPRINT, REFINED_CACHE_LIMIT,
+    Paths, DEPTH_CACHE_LIMIT, DEPTH_PIPELINE_VERSION, INPUT_SIZE, MODEL_FINGERPRINT,
+    REFINED_CACHE_LIMIT, SPLIT_CACHE_LIMIT, SPLIT_PIPELINE_VERSION,
 };
 use anyhow::{bail, Context, Result};
 use std::fs;
@@ -32,10 +35,14 @@ pub fn depth_key(wallpaper_hash: &str) -> String {
     )
 }
 
-/// Cache key for a mask, derived from a depth key plus the user's parameters.
-pub fn mask_key(depth_key: &str, threshold: f32, feather: f32) -> String {
+/// Cache key for the split pair, derived from a depth key plus the parameters.
+///
+/// The pair is a function of the depth field and the two sliders (the refined
+/// field is not part of the key because it is itself derived from the depth key
+/// alone), so it is keyed exactly where the old mask tier was.
+pub fn split_key(depth_key: &str, threshold: f32, feather: f32) -> String {
     format!(
-        "{depth_key}-v{MASK_PIPELINE_VERSION}-t{threshold:.4}-f{feather:.4}"
+        "{depth_key}-s{SPLIT_PIPELINE_VERSION}-t{threshold:.4}-f{feather:.4}"
     )
 }
 
@@ -197,29 +204,42 @@ fn decode_f32_field(
 pub struct CacheEntry {
     pub depth_path: PathBuf,
     pub refined_path: PathBuf,
-    pub mask_path: PathBuf,
+    pub foreground_path: PathBuf,
+    pub background_path: PathBuf,
 }
 
 impl CacheEntry {
     pub fn resolve(paths: &Paths, wallpaper_hash: &str, threshold: f32, feather: f32) -> Self {
         let depth = depth_key(wallpaper_hash);
+        let split = split_key(&depth, threshold, feather);
+        let directory = paths.split_cache();
         Self {
             refined_path: paths
                 .refined_cache()
                 .join(format!("{depth}-r{DEPTH_PIPELINE_VERSION}.dsr")),
             depth_path: paths.depth_cache().join(format!("{depth}.dsc")),
-            mask_path: paths
-                .mask_cache()
-                .join(format!("{}.png", mask_key(&depth, threshold, feather))),
+            foreground_path: directory.join(format!("{split}-fg.png")),
+            background_path: directory.join(format!("{split}-bg.png")),
         }
+    }
+
+    /// Whether the cached pair is complete.
+    ///
+    /// Both files must be present: a run interrupted between the two writes
+    /// would otherwise leave a foreground with no matching background, which
+    /// composites into a visible copy of the subject rather than the intended
+    /// cut-out. `atomic_write` makes each file individually all-or-nothing; the
+    /// pair has to be checked as a pair.
+    pub fn split_is_cached(&self) -> bool {
+        self.foreground_path.is_file() && self.background_path.is_file()
     }
 }
 
-/// Trim all three cache tiers to their configured retention.
+/// Trim all cache tiers to their configured retention.
 pub fn prune_all(paths: &Paths) -> Result<usize> {
     Ok(prune(&paths.depth_cache(), DEPTH_CACHE_LIMIT)?
         + prune(&paths.refined_cache(), REFINED_CACHE_LIMIT)?
-        + prune(&paths.mask_cache(), MASK_CACHE_LIMIT)?)
+        + prune(&paths.split_cache(), SPLIT_CACHE_LIMIT)?)
 }
 
 #[cfg(test)]
@@ -227,11 +247,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mask_key_changes_with_parameters_but_depth_key_does_not() {
+    fn split_key_changes_with_parameters_but_depth_key_does_not() {
         let depth = depth_key("abc");
         assert_eq!(depth, depth_key("abc"));
-        assert_ne!(mask_key(&depth, 0.3, 0.08), mask_key(&depth, 0.4, 0.08));
-        assert_ne!(mask_key(&depth, 0.3, 0.08), mask_key(&depth, 0.3, 0.16));
+        assert_ne!(split_key(&depth, 0.3, 0.08), split_key(&depth, 0.4, 0.08));
+        assert_ne!(split_key(&depth, 0.3, 0.08), split_key(&depth, 0.3, 0.16));
     }
 
     #[test]

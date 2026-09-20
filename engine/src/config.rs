@@ -27,34 +27,58 @@ pub const MODEL_FINGERPRINT: &str = "afb6a5c28f3b6bf1";
 pub const INPUT_SIZE: u32 = 518;
 pub const PATCH_SIZE: u32 = 14;
 
-/// Bump when the depth post-processing changes (invalidates depth + mask).
+/// Bump when the depth post-processing changes (invalidates depth + refined).
 pub const DEPTH_PIPELINE_VERSION: u32 = 1;
-/// Bump when only mask generation changes (invalidates masks, keeps depth).
+/// Bump when the split output changes (invalidates foreground + background).
 ///
-/// v2 emits the mask at the refinement resolution instead of the wallpaper's.
-pub const MASK_PIPELINE_VERSION: u32 = 2;
+/// v1: the engine emits a pair of images — `foreground.png` (premultiplied
+/// RGBA, subject only) and `background.png` (the wallpaper with the subject
+/// region filled in) — instead of a single occlusion mask.
+pub const SPLIT_PIPELINE_VERSION: u32 = 1;
 
 /// Guided-filter refinement is capped at this long edge to bound cost.
 ///
-/// This is also the ceiling for the mask, which is derived from the refined
-/// field and cannot out-resolve it.
+/// This is also the ceiling for the emitted images, which are derived from the
+/// refined field and cannot out-resolve it.
 pub const REFINEMENT_MAX_DIMENSION: u32 = 1920;
 pub const GUIDED_FILTER_RADIUS: u32 = 8;
 pub const GUIDED_FILTER_EPSILON: f32 = 0.001;
 
-/// LRU retention for the three cache tiers.
+/// Radius, as a fraction of the image's short edge, of the blur that fills in
+/// the region the subject was cut out of.
 ///
-/// The refined tier is the largest per entry (full refinement resolution), so it
-/// is kept smallest.
+/// Large on purpose: the fill has to read as out-of-focus background, not as a
+/// smeared copy of the subject. At 6% of a 1080px short edge the radius is 65px,
+/// which is far wider than any feature the subject could leave behind.
+pub const FILL_BLUR_FRACTION: f32 = 0.06;
+
+/// Number of box-filter passes used to approximate a Gaussian.
+///
+/// Three passes converge to within ~3% of a true Gaussian, which is invisible
+/// here — the fill is deliberately low-detail, so approximating it is free.
+pub const FILL_BLUR_PASSES: u32 = 3;
+
+/// Iterations of the dilation that grows the cut-out region before it is filled.
+///
+/// The fill reads only from pixels *outside* the subject, so the region it
+/// replaces has to be grown first: at the subject's own boundary the alpha ramp
+/// is half-transparent, and filling right up to it would let the blur average in
+/// the very pixels being removed — a bright halo tracing the subject.
+pub const FILL_DILATE_PIXELS: u32 = 4;
+
+/// LRU retention for the cache tiers.
+///
+/// The split pair is by far the largest per entry (two full images at refinement
+/// resolution), so it is kept smallest.
 pub const DEPTH_CACHE_LIMIT: usize = 8;
 pub const REFINED_CACHE_LIMIT: usize = 4;
-pub const MASK_CACHE_LIMIT: usize = 32;
+pub const SPLIT_CACHE_LIMIT: usize = 8;
 
 /// Relative layout inside the plugin data directory.
 pub const DIR_MODEL: &str = "models/depth-anything-v2-small";
 pub const DIR_DEPTH_CACHE: &str = "cache/depth";
 pub const DIR_REFINED_CACHE: &str = "cache/refined";
-pub const DIR_MASK_CACHE: &str = "cache/masks";
+pub const DIR_SPLIT_CACHE: &str = "cache/split";
 pub const DIR_RUNTIME: &str = "runtime";
 
 /// Resolved filesystem layout for one engine invocation.
@@ -96,8 +120,8 @@ impl Paths {
         self.root.join(DIR_REFINED_CACHE)
     }
 
-    pub fn mask_cache(&self) -> PathBuf {
-        self.root.join(DIR_MASK_CACHE)
+    pub fn split_cache(&self) -> PathBuf {
+        self.root.join(DIR_SPLIT_CACHE)
     }
 
     pub fn runtime(&self) -> PathBuf {
@@ -113,7 +137,7 @@ impl Paths {
             self.root.join(DIR_MODEL),
             self.depth_cache(),
             self.refined_cache(),
-            self.mask_cache(),
+            self.split_cache(),
             self.runtime(),
         ] {
             std::fs::create_dir_all(&dir)
