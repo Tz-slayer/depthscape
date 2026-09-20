@@ -5,7 +5,7 @@ wallpaper into near and far, and the near part is redrawn above the desktop
 widgets — so characters and scenery occlude your clock and cards, the way an
 iOS depth-effect lock screen does.
 
-![Depthscape in action](assets/screenshot.jpg)
+![Depthscape in action](assets/screenshot.png)
 
 The model runs once per wallpaper change. The desktop side is pure GPU
 compositing, so nothing is inferred while you work.
@@ -62,16 +62,6 @@ Then enable **Depthscape** under **Settings → Plugins**.
 3. Masks are generated automatically. If the result is too aggressive or too
    subtle, adjust **Foreground threshold** and **Edge feather**.
 
-## How it works
-
-DMS draws desktop widgets and Depthscape's foreground on the same layer-shell
-layer, so the layer order does not decide which one is in front — map order
-within the layer does. The daemon re-maps its surface after DMS rebuilds its
-widgets, which is what keeps the foreground on top.
-
-The reasoning, the source references and the measurements behind that are in
-[`docs/depthscape.md`](docs/depthscape.md).
-
 ## Engine CLI
 
 The engine also works standalone:
@@ -86,33 +76,6 @@ depthscape-engine clear-cache
 `analyze` prints a single line of JSON with the mask path and the cache status.
 `--threshold` (0.0–1.0) is the depth cutoff — lower values bring more of the
 scene in front — and `--feather` (0.0–0.5) is the transition width around it.
-
-## Development
-
-```bash
-cd engine && cargo test
-
-# Reproduce the compositing in a browser instead of restarting the shell
-tools/make-preview.py --wallpaper ~/Pictures/Wallpapers/some.png
-
-# Layer regression test against a real niri session
-tools/layer-stacking-test/setup.sh
-qs -p tools/layer-stacking-test
-
-# Time the four cache scenarios, with the per-stage breakdown
-cp -a ~/.local/share/depthscape /tmp/dsbench
-python3 tools/bench.py --wallpaper ~/Pictures/Wallpapers/some.png --data-dir /tmp/dsbench
-```
-
-Run the layer harness after touching anything to do with stacking or mask
-compositing — it drives the real `DepthDaemon` and `DepthForeground` and judges
-the result from pixels. See
-[`tools/layer-stacking-test/README.md`](tools/layer-stacking-test/README.md).
-
-`tools/bench.py` needs a scratch copy of the data directory because it deletes
-cache entries to force the cold scenarios; it refuses to run against the live
-one. The measured baseline is in
-[`docs/depthscape.md`](docs/depthscape.md) §11.
 
 ## Status
 

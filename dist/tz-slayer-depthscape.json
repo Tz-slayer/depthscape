@@ -9,5 +9,5 @@
     "dependencies": ["curl", "qt6-5compat"],
     "compositors": ["niri"],
     "distro": ["any"],
-    "screenshot": "https://raw.githubusercontent.com/Tz-slayer/depthscape/main/assets/screenshot.jpg"
+    "screenshot": "https://raw.githubusercontent.com/Tz-slayer/depthscape/main/assets/screenshot.png"
 }
