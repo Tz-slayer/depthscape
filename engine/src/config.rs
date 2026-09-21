@@ -31,15 +31,73 @@ pub const PATCH_SIZE: u32 = 14;
 pub const DEPTH_PIPELINE_VERSION: u32 = 1;
 /// Bump when the split output changes (invalidates foreground + background).
 ///
-/// v1: the engine emits a pair of images — `foreground.png` (premultiplied
+/// v1: the engine emits a pair of images — `foreground.png` (straight-alpha
 /// RGBA, subject only) and `background.png` (the wallpaper with the subject
 /// region filled in) — instead of a single occlusion mask.
-pub const SPLIT_PIPELINE_VERSION: u32 = 1;
+///
+/// v2: the pair is emitted at the wallpaper's own resolution instead of being
+/// capped at `REFINEMENT_MAX_DIMENSION`. The cap never bought what its comment
+/// claimed — the alpha field does carry structure above 1920, because the guided
+/// filter transfers the wallpaper's own luminance edges onto it — and it cost a
+/// second, coarser resample on the GPU at composite time.
+pub const SPLIT_PIPELINE_VERSION: u32 = 2;
+
+/// The resolution the emitted images are produced at.
+///
+/// * `Original` — the wallpaper's own size. One resample from source to output,
+///   then a 1:1 blit for an output whose resolution matches the wallpaper. This
+///   is the default: it is the only setting that does not throw away detail the
+///   refine step went to the trouble of recovering.
+/// * `Capped(n)` — never larger than `n` on the long edge, and never larger than
+///   the wallpaper. For a machine where the PNG encode or the resident texture
+///   is the binding constraint rather than quality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputSize {
+    Original,
+    Capped(u32),
+}
+
+impl OutputSize {
+    /// Resolve against a wallpaper's dimensions.
+    pub fn resolve(self, source_width: u32, source_height: u32) -> (u32, u32) {
+        let (width, height) = (source_width.max(1), source_height.max(1));
+        let cap = match self {
+            OutputSize::Original => return (width, height),
+            OutputSize::Capped(cap) => cap,
+        };
+        let scale = f64::min(1.0, cap as f64 / width.max(height) as f64);
+        (
+            ((width as f64 * scale).round() as u32).max(1),
+            ((height as f64 * scale).round() as u32).max(1),
+        )
+    }
+}
+
+/// Default output size.
+///
+/// Overridable at runtime through `$DEPTHSCAPE_OUTPUT_MAX_DIMENSION`, which
+/// selects `Capped(n)` — the escape hatch for a machine where the PNG encode or
+/// the resident GPU texture is the binding constraint rather than quality.
+/// There is deliberately no way to ask for *more* than the wallpaper.
+pub fn output_size() -> OutputSize {
+    match std::env::var_os("DEPTHSCAPE_OUTPUT_MAX_DIMENSION") {
+        Some(value) => match value.to_string_lossy().parse::<u32>() {
+            Ok(cap) if cap > 0 => OutputSize::Capped(cap),
+            _ => OutputSize::Original,
+        },
+        None => OutputSize::Original,
+    }
+}
 
 /// Guided-filter refinement is capped at this long edge to bound cost.
 ///
-/// This is also the ceiling for the emitted images, which are derived from the
-/// refined field and cannot out-resolve it.
+/// This is a *cost* ceiling on the refine step, NOT a ceiling on the emitted
+/// images — those follow `OUTPUT_SIZE`. Raising it makes the refinement slower
+/// in exchange for a guide image with more real resolution to snap edges to;
+/// lowering it does not shrink the output, only the fidelity of the edges.
+///
+/// Kept at 1920 so that the common case — a wallpaper no larger than this —
+/// runs the filter at exactly the resolution it will be displayed at.
 pub const REFINEMENT_MAX_DIMENSION: u32 = 1920;
 pub const GUIDED_FILTER_RADIUS: u32 = 8;
 pub const GUIDED_FILTER_EPSILON: f32 = 0.001;

@@ -469,8 +469,8 @@ depthscape-engine analyze --wallpaper <path> --threshold 0.30 --feather 0.08
   "wallpaperPath": "...",
   "width": 5120,
   "height": 2880,
-  "outputWidth": 1920,
-  "outputHeight": 1080,
+  "outputWidth": 5120,
+  "outputHeight": 2880,
   "depthCacheHit": true,
   "refinedCacheHit": true,
   "splitCacheHit": false,
@@ -935,12 +935,20 @@ niri 导航事件
 2. **壁纸延迟解码。** 原来为了拿宽高而整张解码，5K 壁纸要 ~60 ms，
    连纯缓存命中也得付。改为只读文件头取宽高（`image_dimensions`），
    只有真正需要像素的深度/精修两级才解码——而这两级在拆图命中时根本不跑。
-3. **拆图按精细化分辨率输出。** 拆图是精修深度场的逐点函数，不可能比它更清晰。
-   原来把遮罩上采样回壁纸分辨率再编码：5K 壁纸下是深度场 **7.1 倍**的像素，
-   多出来的全是插值。现按细化分辨率（长边 1920）输出，
-   `-fg.png` 实测 2.5 MB / 1920×1080 RGBA，`-bg.png` 1.88 MB / RGB。
-   QML 侧本来就用 `PreserveAspectCrop` 缩放到输出，且缩放由 GPU 完成。
+3. **拆图保持壁纸原始分辨率。** 曾经把输出压在细化分辨率（长边 1920），
+   理由是"拆图是精修深度场的逐点函数，不可能比它更清晰"——**这个理由不成立**。
+   引导滤波会把**壁纸自身的亮度边缘**吸附进深度场，所以 alpha 在 1920 之上
+   仍然携带真实结构：把 1920 的 alpha 降到 1440 再升回来，MAE 0.714 / p99 30，
+   远不是 0。压到 1920 反而在合成时引入第二次更粗的重采样
+   （1920 → 屏幕 2560，GPU 双线性）。
+   现按壁纸原始分辨率输出（`OutputSize::Original`）。5K 壁纸下
+   `-fg.png` 实测 **24.9 MB** / 5120×2880 RGBA，`-bg.png` **20.0 MB** / RGB，
+   单组合计 55 MB，`split` 阶段 2459 ms。
+   质量控制：全分辨率 alpha 相对"1920 上采样"的差异为
+   MAE 0.14 / 255、p99 5，仅 0.131% 的像素差异 >16。
    该改动把 `SPLIT_PIPELINE_VERSION` 提到 2，旧产物自动失效重算。
+   `$DEPTHSCAPE_OUTPUT_MAX_DIMENSION=n` 可退回 `Capped(n)` 模式
+   （磁盘或显存成为瓶颈时使用）。
 
 剩余成本几乎都在冷启动路径上，且是模型与算法本身：
 深度推理 ~672 ms、guided filter ~147 ms、解码 61 ms。
@@ -1283,9 +1291,10 @@ straight alpha 下合成式是 `α·C_fg + (1-α)·C_bg`，而 `C_fg = C_src`，
   `Qt5Compat.GraphicalEffects`——一个 DMS 自身不使用的模块，等于给所有用户
   加一个系统依赖。拆图方案下两者都不需要了。
 - **引擎直接输出成品图（壁纸 RGB + alpha）**：同一张 5120×2880 壁纸，
-  成品 PNG 是 **27 MB**，纯遮罩只有 277 KB。但这个反对理由在拆图方案下
-  已经失效——现在输出的是降采样后的 1920×1080，`-fg.png` **2.5 MB**、
-  `-bg.png` **1.88 MB**，且 `-bg` 用 RGB 而非 RGBA 又省掉四分之一。
+  成品 PNG 是 **27 MB**，纯遮罩只有 277 KB。这个篇幅代价在拆图方案下依然
+  存在且不小——保持原始分辨率后单组 55 MB、8 组上限 441 MB。
+  接受它的理由是质量：alpha 在 1920 之上仍有真实结构（见性能一节），
+  而 `-bg` 用 RGB 而非 RGBA 已省掉四分之一。
 - **`place-within-backdrop`**：把 surface 放进 overview 的共享 backdrop。
   必须由 niri `layer-rule` 按 namespace 显式开启——**本架构用它是必需的**
   （否则背景会被逐 workspace card 克隆），因此 README 里有一条必做的

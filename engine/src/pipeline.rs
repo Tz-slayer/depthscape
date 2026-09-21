@@ -136,6 +136,7 @@ pub fn analyze(paths: &Paths, request: &AnalyzeRequest) -> Result<AnalyzeOutcome
 
     let (model_width, model_height) = imageops::inference_size(source_width, source_height);
     let (output_width, output_height) = refinement_size(source_width, source_height);
+    let (refine_width, refine_height) = refine_size(output_width, output_height);
 
     // --- the common case --------------------------------------------------
     // A cached pair is the entire answer. Nothing below reads the depth field
@@ -187,7 +188,7 @@ pub fn analyze(paths: &Paths, request: &AnalyzeRequest) -> Result<AnalyzeOutcome
         let decoded_before = timings.decode_ms;
         let stage = Instant::now();
         let (refined, hit) = match fs::read(&entry.refined_path).ok().and_then(|bytes| {
-            cache::decode_refined(&bytes, output_width, output_height).ok()
+            cache::decode_refined(&bytes, refine_width, refine_height).ok()
         }) {
             Some(cached) => (cached, true),
             None => {
@@ -196,12 +197,12 @@ pub fn analyze(paths: &Paths, request: &AnalyzeRequest) -> Result<AnalyzeOutcome
                     &depth,
                     model_width,
                     model_height,
-                    output_width,
-                    output_height,
+                    refine_width,
+                    refine_height,
                 )?;
                 cache::atomic_write(
                     &entry.refined_path,
-                    &cache::encode_refined(output_width, output_height, &computed),
+                    &cache::encode_refined(refine_width, refine_height, &computed),
                 )?;
                 (computed, false)
             }
@@ -227,6 +228,22 @@ pub fn analyze(paths: &Paths, request: &AnalyzeRequest) -> Result<AnalyzeOutcome
         };
         let alpha =
             imageops::foreground_alpha(&refined, threshold, feather, crate::depth::NEAR_IS_HIGH);
+        // The refined field is capped at REFINEMENT_MAX_DIMENSION; the pair is
+        // not. When the two differ the alpha has to be lifted to the output
+        // resolution, and bilinear is the right kernel for it: the field is a
+        // smooth coverage signal, so a sharper one would only invent ringing
+        // along the contour.
+        let alpha = if (refine_width, refine_height) == (output_width, output_height) {
+            alpha
+        } else {
+            imageops::resize_bilinear(
+                &alpha,
+                refine_width,
+                refine_height,
+                output_width,
+                output_height,
+            )
+        };
         let (foreground, background) = split_at_resolution(&resized, &alpha);
         cache::atomic_write(
             &entry.foreground_path,
@@ -400,20 +417,27 @@ fn encode_png(image: DynamicImage) -> Result<Vec<u8>> {
 
 /// Resolution at which the split pair is emitted.
 ///
-/// The pair is a pointwise function of the refined depth field, so it cannot
-/// carry detail that field does not have. Emitting it at the wallpaper's own
-/// resolution therefore buys nothing and costs a great deal: on a 5K wallpaper
-/// the output was seven times the pixels of the field it came from, all of it
-/// upsampled, PNG-encoded, written to disk, read back and uploaded to the GPU.
-/// The consumer scales the output anyway, and does it on the GPU for free.
+/// Follows `config::output_size()`, which defaults to the wallpaper's own
+/// resolution. See that function for why the previous cap was removed.
 fn refinement_size(source_width: u32, source_height: u32) -> (u32, u32) {
+    crate::config::output_size().resolve(source_width, source_height)
+}
+
+/// Resolution at which the guided filter runs.
+///
+/// Bounded by `REFINEMENT_MAX_DIMENSION` and by the output size, because
+/// refining above the resolution the pair is emitted at would be work whose
+/// result is discarded. When the output is the wallpaper (the default) this is
+/// the wallpaper itself, capped.
+fn refine_size(output_width: u32, output_height: u32) -> (u32, u32) {
+    let (width, height) = (output_width.max(1), output_height.max(1));
     let scale = f64::min(
         1.0,
-        REFINEMENT_MAX_DIMENSION as f64 / source_width.max(source_height) as f64,
+        REFINEMENT_MAX_DIMENSION as f64 / width.max(height) as f64,
     );
     (
-        ((source_width as f64 * scale).round() as u32).max(1),
-        ((source_height as f64 * scale).round() as u32).max(1),
+        ((width as f64 * scale).round() as u32).max(1),
+        ((height as f64 * scale).round() as u32).max(1),
     )
 }
 
@@ -760,23 +784,39 @@ mod tests {
     }
 
     #[test]
-    fn refinement_size_caps_the_long_edge() {
+    fn the_output_keeps_the_wallpaper_resolution() {
+        // The default. The pair carries structure above the old 1920 cap — the
+        // guided filter transfers the wallpaper's luminance edges onto the
+        // alpha — so capping it threw away detail the refine step recovered.
+        assert_eq!(refinement_size(5120, 2880), (5120, 2880));
+        assert_eq!(refinement_size(3840, 2160), (3840, 2160));
         assert_eq!(refinement_size(1920, 1080), (1920, 1080));
-        assert_eq!(refinement_size(960, 540), (960, 540));
-        let (width, height) = refinement_size(5120, 2880);
-        assert_eq!(width, REFINEMENT_MAX_DIMENSION);
-        assert_eq!(height, 1080);
-        assert_eq!(width as f64 / height as f64, 5120.0 / 2880.0);
+        assert_eq!(refinement_size(1280, 720), (1280, 720));
     }
 
     #[test]
-    fn output_never_out_resolves_the_depth_field_it_comes_from() {
-        // Above the cap the output follows the refinement size, so a 5K
-        // wallpaper stops paying for a 5K PNG.
-        assert_eq!(refinement_size(5120, 2880), (REFINEMENT_MAX_DIMENSION, 1080));
-        // Below the cap nothing is dropped: the output is the wallpaper.
-        assert_eq!(refinement_size(1920, 1080), (1920, 1080));
-        assert_eq!(refinement_size(1280, 720), (1280, 720));
+    fn a_capped_output_shrinks_but_never_grows() {
+        let capped = crate::config::OutputSize::Capped(1920);
+        // Above the cap: follows the cap, aspect intact.
+        assert_eq!(capped.resolve(5120, 2880), (1920, 1080));
+        // Below the cap: untouched — the cap is a ceiling, not a target.
+        assert_eq!(capped.resolve(1280, 720), (1280, 720));
+        assert_eq!(capped.resolve(1920, 1080), (1920, 1080));
+    }
+
+    #[test]
+    fn refinement_is_bounded_by_both_the_cap_and_the_output() {
+        // The guided filter never runs above the cap, and never above the
+        // resolution the pair is emitted at — refining past the output is work
+        // whose result would be discarded.
+        let (width, height) = refine_size(5120, 2880);
+        assert_eq!(width, REFINEMENT_MAX_DIMENSION);
+        assert_eq!(height, 1080);
+
+        // An output inside the cap refines at exactly the output size, so the
+        // alpha needs no lift before the split.
+        assert_eq!(refine_size(1280, 720), (1280, 720));
+        assert_eq!(refine_size(1920, 1080), (1920, 1080));
     }
 
     #[test]

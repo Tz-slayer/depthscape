@@ -124,11 +124,11 @@ PanelWindow {
         color: SettingsData.effectiveWallpaperBackgroundColor
     }
 
-    // The image is emitted at the same aspect ratio as the wallpaper but at a
-    // reduced resolution (long edge capped at 1920), so it is scaled up to fill
-    // the output. `PreserveAspectCrop` rather than `Stretch` because the two
-    // surfaces must be scaled *identically* — any difference between them shows
-    // up as a seam along the subject's silhouette.
+    // The image is emitted at the wallpaper's own resolution and aspect ratio,
+    // so on an output smaller than the wallpaper it is scaled *down* to fit.
+    // `PreserveAspectCrop` rather than `Stretch` because the two surfaces must be
+    // scaled *identically* — any difference between them shows up as a seam
+    // along the subject's silhouette.
     Image {
         id: backdrop
 
@@ -138,7 +138,7 @@ PanelWindow {
         // The cache is keyed by URL, and a regenerated image keeps the same URL,
         // so a changed file would be served from the old texture. The daemon
         // gives every generation a distinct path, but disabling the cache also
-        // avoids holding two 1920x1080 textures per output.
+        // avoids holding two full-resolution textures per output.
         cache: false
         asynchronous: true
         smooth: true
