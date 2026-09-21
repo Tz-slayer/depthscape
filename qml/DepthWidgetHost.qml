@@ -47,6 +47,10 @@ PanelWindow {
     /// Whether widgets should be drawn at all (effect off ⇒ nothing to occlude).
     property bool widgetsEnabled: true
 
+    /// Opacity of the whole surface, driven by DepthDaemon so that all three
+    /// fade together while the overview is open.
+    property real overviewOpacity: 1
+
     property var layout: []
     property bool loaded: false
 
@@ -77,25 +81,103 @@ PanelWindow {
     // the one exception is edit mode, which the settings page drives.
     mask: Region {}
 
-    // ------------------------------------------------------------------ loading
+    // ------------------------------------------------------------- overview fade
 
-    FileView {
-        id: layoutFile
+    // The only transform on the widgets is the overview fade, and it has to live
+    // on a content item rather than on the window: `PanelWindow` is a Wayland
+    // surface and has no `opacity` of its own.
+    //
+    // THE WIDGETS DO NOT MOVE WITH THE PARALLAX, and that is deliberate rather
+    // than unfinished. They are drawn on the wallpaper — they are the thing the
+    // subject stands in front of — so they are part of the frame the depth is
+    // measured against. Sliding them would slide the reference itself, and the
+    // subject would appear to move only because the clock moved under it. The
+    // reference implementation leaves its widgets alone for the same reason.
+    Item {
+        id: fader
 
-        path: root.layoutPath
-        blockLoading: false
-        watchChanges: true
-        printErrors: false
+        anchors.fill: parent
+        opacity: root.overviewOpacity
 
-        onLoaded: root.applyLayout()
-        onFileChanged: layoutFile.reload()
-        onLoadFailed: error => {
-            // A missing file is the normal first run, not an error worth
-            // surfacing. An empty layout simply means no widgets.
-            root.layout = [];
-            root.loaded = true;
+        // ------------------------------------------------------------------ loading
+
+        FileView {
+            id: layoutFile
+
+            path: root.layoutPath
+            blockLoading: false
+            watchChanges: true
+            printErrors: false
+
+            onLoaded: root.applyLayout()
+            onFileChanged: layoutFile.reload()
+            onLoadFailed: error => {
+                // A missing file is the normal first run, not an error worth
+                // surfacing. An empty layout simply means no widgets.
+                root.layout = [];
+                root.loaded = true;
+            }
+        }
+
+        // One loader per widget entry for this output. `Repeater` rather than
+        // `Instantiator` because the delegates are visible items that need to be
+        // laid out, and because the count is small (a handful of widgets).
+        Repeater {
+            model: root.targetScreen ? root.widgetsFor(root.targetScreen.name) : []
+
+            delegate: Item {
+                id: holder
+
+                required property var modelData
+                required property int index
+
+                // Placement is in logical pixels from the top-left of the
+                // output, matching the coordinate space the settings page
+                // shows. Clamped so a layout made on a large monitor cannot push
+                // a widget off a smaller one entirely.
+                x: Math.max(0, Math.min((modelData.x ?? 0),
+                    Math.max(0, root.width - width)))
+                y: Math.max(0, Math.min((modelData.y ?? 0),
+                    Math.max(0, root.height - height)))
+
+                width: widgetItem ? widgetItem.implicitWidth : 0
+                height: widgetItem ? widgetItem.implicitHeight : 0
+
+                Loader {
+                    id: widgetItem
+
+                    anchors.fill: parent
+                    asynchronous: false
+                    source: root.sourceFor(holder.modelData.type)
+
+                    onLoaded: {
+                        if (!item)
+                            return;
+                        item.settings = holder.modelData.settings ?? {};
+                        item.editMode = false;
+                    }
+
+                    onStatusChanged: {
+                        if (status === Loader.Error)
+                            console.warn("Depthscape: widget type not found: " + holder.modelData.type);
+                    }
+                }
+
+                Component.onCompleted: {
+                    const next = {};
+                    for (const key in root.hosts)
+                        next[key] = root.hosts[key];
+                    next[holder.modelData.id ?? (holder.modelData.type + "_" + holder.index)] = holder;
+                    root.hosts = next;
+                }
+            }
         }
     }
+
+    // The overview fade is carried by `fader` above: `PanelWindow` is a Wayland
+    // surface and has no `opacity` of its own.
+
+    // ---------------------------------------------------------------- the host
 
     function applyLayout() {
         let parsed = null;
@@ -122,60 +204,6 @@ PanelWindow {
     }
 
     // ---------------------------------------------------------------- the host
-
-    // One loader per widget entry for this output. `Repeater` rather than
-    // `Instantiator` because the delegates are visible items that need to be
-    // laid out, and because the count is small (a handful of widgets).
-    Repeater {
-        model: root.targetScreen ? root.widgetsFor(root.targetScreen.name) : []
-
-        delegate: Item {
-            id: holder
-
-            required property var modelData
-            required property int index
-
-            // Placement is in logical pixels from the top-left of the output,
-            // matching the coordinate space the settings page shows. Clamped so
-            // a layout made on a large monitor cannot push a widget off a
-            // smaller one entirely.
-            x: Math.max(0, Math.min((modelData.x ?? 0),
-                Math.max(0, root.width - width)))
-            y: Math.max(0, Math.min((modelData.y ?? 0),
-                Math.max(0, root.height - height)))
-
-            width: widgetItem ? widgetItem.implicitWidth : 0
-            height: widgetItem ? widgetItem.implicitHeight : 0
-
-            Loader {
-                id: widgetItem
-
-                anchors.fill: parent
-                asynchronous: false
-                source: root.sourceFor(holder.modelData.type)
-
-                onLoaded: {
-                    if (!item)
-                        return;
-                    item.settings = holder.modelData.settings ?? {};
-                    item.editMode = false;
-                }
-
-                onStatusChanged: {
-                    if (status === Loader.Error)
-                        console.warn("Depthscape: widget type not found: " + holder.modelData.type);
-                }
-            }
-
-            Component.onCompleted: {
-                const next = {};
-                for (const key in root.hosts)
-                    next[key] = root.hosts[key];
-                next[holder.modelData.id ?? (holder.modelData.type + "_" + holder.index)] = holder;
-                root.hosts = next;
-            }
-        }
-    }
 
     /// Map a widget type from the layout file onto a QML component.
     ///

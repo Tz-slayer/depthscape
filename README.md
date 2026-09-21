@@ -17,6 +17,9 @@ compositing, so nothing is inferred while you work.
 - Three-tier cache: dragging the sliders re-runs the split only, never the model
 - One wallpaper per monitor, split independently
 - Click-through surfaces, so the widgets underneath stay usable
+- Navigation parallax: moving between workspaces and columns slides the subject
+  and the background in opposite directions, and stepping back returns the scene
+  exactly where it started
 - Owns the niri overview backdrop, so the workspace cards share one continuous
   wallpaper instead of repeating a copy per card
 - Desktop status tile and a settings page
@@ -81,14 +84,50 @@ flash. If you would rather not draw two copies of the same image, point DMS's
 wallpaper at a flat colour.
 
 Because the backdrop is a single image shared by every card, the widgets and the
-subject are hidden there — a wallpaper is one image per screen and should read as
-one. The background surface stays mapped and blurs itself.
+subject fade out there — a wallpaper is one image per screen and should read as
+one. All three layers stay mapped and dim together; unmapping the subject instead
+would leave the overview marginally cleaner but pops, because the compositor has
+to rebuild the backdrop in a single frame.
 
 Depthscape and DMS's wallpaper end up in the *same* backdrop, and niri renders a
 backdrop in map order (last mapped draws on top), so Depthscape re-asserts its
 stack a few times after startup. Anyone touching the surface code should read
 §14.1 and §14.6 of the design notes first — the ordering is subtler than the layer
 names suggest.
+
+## Parallax
+
+Moving between workspaces and columns slides the scene. The subject and the
+background move in opposite directions — the subject with the navigation, the
+background against it at a third of the distance — which is what produces the
+depth. Only those two layers move: the widgets hold still, because they are the
+thing the subject stands in front of and therefore the reference frame the depth
+is read against.
+
+The offset is *cumulative*, not a per-keypress animation: each step moves the
+scene by a little less than the one before, and stepping back retraces the same
+path. Step away and step back and the scene lands exactly where it started. The
+whole thing is bounded by **Total travel**, which is the asymptote those steps
+approach rather than a distance ever reached.
+
+Both layers are drawn on a canvas larger than the screen — 12% of the longer edge
+for each of the two directions it can travel — so there is always image under the
+viewport, and the extra is never visible at rest.
+
+If a layer ever looks *inside-out*, misaligned, or noticeably sharper than it
+should be at rest, the canvas has been scaled instead of enlarged. Scaling
+resamples about the image's own centre, which displaces a static scene by half the
+scale factor — larger than the parallax travel itself.
+
+There is one thing parallax cannot do. The horizontal axis reads the focused
+window's column, because niri emits no column event of its own — so on an empty
+workspace there is no column to read and the horizontal axis holds still. That is
+by design, not a bug.
+
+Two controls are worth knowing about. **Invert direction** flips the sense of
+travel. **Background travel** sets how much of the foreground's movement the
+background echoes; at zero the subject looks pasted on, and past about 60% the
+two layers stop reading as separate planes.
 
 ## Build the engine
 
@@ -171,12 +210,30 @@ the cache status, and a per-stage timing breakdown. `--threshold` (0.0–1.0) is
 depth cutoff — lower values bring more of the scene in front — and `--feather`
 (0.0–0.5) is the transition width around it.
 
+## Verification
+
+```bash
+tools/verify-all.sh
+```
+
+Runs the static checks (QML lint, the scroll-math unit tests, and a check that
+every settings control has a key the daemon reads), the engine's `cargo test`,
+and three live pixel-level checks: that a forced parallax offset reaches the
+screen in preference to the three ways it could fail to, that the background is
+moving by the configured fraction, and that navigating away and back returns the
+scene to where it started.
+
+The live checks screenshot the focused output, so they need a workspace with
+nothing on it and will walk to one — expect the desktop to move for a few
+seconds. Measured error floor is about 0.7/255 against a clean frame; the
+parallax check's margin over the next-best explanation is about 10.
+
 ## Status
 
 Working on niri. Hyprland is expected to work but is untested, which is why
-`compositors` lists only niri. Occlusion has been verified pixel-by-pixel on a
-single output so far. Planned: navigation-driven parallax, a depth shader, and
-building the engine from inside the plugin.
+`compositors` lists only niri. Occlusion and parallax have both been verified
+pixel-by-pixel on a single output so far. Planned: a depth shader and building
+the engine from inside the plugin.
 
 ## License
 

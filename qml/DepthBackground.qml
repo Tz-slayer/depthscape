@@ -83,7 +83,33 @@ PanelWindow {
     /// (`SettingsData.blurWallpaperOnOverview`).
     property bool blurred: false
 
+    /// Parallax offset in output logical pixels, shared by all three surfaces of
+    /// this output. Supplied by DepthParallax; see DepthParallax.qml for the
+    /// curve and DepthForeground.qml for why the two layers move oppositely.
+    property real offsetX: 0
+    property real offsetY: 0
+
+    /// Spare area this surface must carry on every side, in output logical
+    /// pixels, so that a shift slides new material into view instead of pulling
+    /// this surface's own border on screen. Comes from the tracker, which is the
+    /// only thing that knows how far an offset can reach.
+    property real reserve: 0
+
+    /// Opacity of the whole surface, driven by DepthDaemon so that all three
+    /// fade together while the overview is open. One value for all three, never
+    /// per-surface: the foreground's silhouette has to stay registered against
+    /// the hole it was cut from, and two disagreeing opacities mid-ramp read as
+    /// a seam along the contour.
+    property real overviewOpacity: 1
+
     readonly property bool active: backgroundPath !== ""
+
+    /// Overscan in logical pixels. Rounded up and given a small margin so an
+    /// extreme travel still does not clip.
+    ///
+    /// This is deliberately a *container* size rather than a scale factor on the
+    /// image. See the note on the Image below.
+    readonly property real overscan: root.reserve > 0 ? Math.ceil(root.reserve) + 8 : 0
 
     screen: root.targetScreen
     visible: root.active
@@ -108,62 +134,137 @@ PanelWindow {
     // normally.
     mask: Region {}
 
-    // A flat colour behind the image, exactly as DMS's own wallpaper does
-    // (`WallpaperBackground.qml` draws `effectiveWallpaperBackgroundColor`
-    // before the image). Two things depend on it:
+    // THE OVERVIEW FADE
     //
-    //   * While the image is still decoding, `color: "transparent"` would let
-    //     whatever is below show through as a full-screen flash on every
-    //     regeneration.
-    //   * The image is scaled with `PreserveAspectCrop`, so on a wallpaper whose
-    //     aspect ratio differs from the output there is nothing to crop and the
-    //     thumbnail is letterboxed — the flat colour makes that look intentional
-    //     instead of broken.
-    Rectangle {
-        anchors.fill: parent
-        color: SettingsData.effectiveWallpaperBackgroundColor
-    }
-
-    // The image is emitted at the wallpaper's own resolution and aspect ratio,
-    // so on an output smaller than the wallpaper it is scaled *down* to fit.
-    // `PreserveAspectCrop` rather than `Stretch` because the two surfaces must be
-    // scaled *identically* — any difference between them shows up as a seam
-    // along the subject's silhouette.
-    Image {
-        id: backdrop
-
-        anchors.fill: parent
-        source: root.backgroundPath !== "" ? "file://" + root.backgroundPath : ""
-        fillMode: Image.PreserveAspectCrop
-        // The cache is keyed by URL, and a regenerated image keeps the same URL,
-        // so a changed file would be served from the old texture. The daemon
-        // gives every generation a distinct path, but disabling the cache also
-        // avoids holding two full-resolution textures per output.
-        cache: false
-        asynchronous: true
-        smooth: true
-    }
-
-    // Matching DMS's own overview blur exactly, so the shared backdrop is
-    // indistinguishable from what the user sees with this plugin off. The
-    // parameters are `WallpaperBackground.qml`'s `overviewBlurLoader`: blur 0.8,
-    // blurMax 75, autoPaddingEnabled false.
+    // `PanelWindow` is a Wayland surface, not a plain Item, and has no
+    // `opacity` of its own — assigning one is a startup error. The fade
+    // therefore has to live on a content root inside it, which is why every
+    // visual in this file (the fill, the image, the blur) sits under this one
+    // Item rather than directly under the window.
     //
-    // `autoPaddingEnabled: false` matters: with padding on the effect grows the
-    // item to make room for the blur, which shifts and shrinks the image relative
-    // to the crisp state and reads as a zoom on every overview toggle.
-    Loader {
-        anchors.fill: parent
-        active: root.blurred && root.active
+    // One value for all three surfaces, never per-surface: the foreground's
+    // silhouette has to stay registered against the hole it was cut from, and
+    // two disagreeing opacities mid-ramp read as a seam along the contour.
+    Item {
+        id: fader
 
-        sourceComponent: MultiEffect {
-            anchors.fill: parent
-            source: backdrop
-            blurEnabled: true
-            blur: 0.8
-            blurMax: 75
-            autoPaddingEnabled: false
+        anchors.fill: parent
+        opacity: root.overviewOpacity
+
+        // A flat colour behind the image, exactly as DMS's own wallpaper does
+        // (`WallpaperBackground.qml` draws `effectiveWallpaperBackgroundColor`
+        // before the image). Two things depend on it:
+        //
+        //   * While the image is still decoding, `color: "transparent"` would
+        //     let whatever is below show through as a full-screen flash on every
+        //     regeneration.
+        //   * The image is scaled with `PreserveAspectCrop`, so on a wallpaper
+        //     whose aspect ratio differs from the output there is nothing to
+        //     crop and the thumbnail is letterboxed — the flat colour makes that
+        //     look intentional instead of broken.
+        //
+        // The parallax shift is applied to the *container* below rather than to
+        // this rectangle, so the fill never runs out from under the image: it is
+        // grown with the container and simply stays behind everything.
+        Rectangle {
+            anchors.fill: container
+            color: SettingsData.effectiveWallpaperBackgroundColor
+        }
+
+        // The oversized box. Its centre is the viewport's centre, so a child
+        // sized to the viewport and centred in it occupies exactly the screen
+        // rect.
+        //
+        // THE OVERSIZE IS ON THE BOX, NOT ON THE IMAGE, AND THAT IS THE WHOLE
+        // POINT.
+        //
+        // A wallpaper on a 16:9 output from a 16:9 source is scaled with
+        // `PreserveAspectCrop` and has no slack at all: shifting it eight pixels
+        // exposes a stripe of whatever is behind. Spare area is the only fix,
+        // and there are two ways to get it:
+        //
+        //   * `scale: 1 + eps` on the image — rejected. Scaling resamples about
+        //     the image's *own centre* and displaces it by `size × eps / 2`,
+        //     which at a realistic overscan is 25+ logical pixels — larger than
+        //     the parallax travel itself. The scene would be visibly off-centre
+        //     while the user stood still.
+        //
+        //   * A larger box with the image still sized to the viewport — what
+        //     this does. The image keeps the exact geometry the foreground uses,
+        //     so the two agree pixel for pixel at rest, and the surrounding
+        //     spare area is what a shift slides into view. Overscan and parallax
+        //     are therefore independent: the offset below is applied on top of
+        //     an image that has not moved at all.
+        Item {
+            id: container
+
+            x: -root.overscan
+            y: -root.overscan
+            width: parent.width + 2 * root.overscan
+            height: parent.height + 2 * root.overscan
+
+            // Applied here, around the image rather than on it, so it composes
+            // with the centring below instead of fighting it. `Translate` cannot
+            // change the image's rendered size, which is what keeps the two
+            // layers aligned.
+            transform: Translate {
+                x: root.offsetX
+                y: root.offsetY
+            }
+
+            // The image is emitted at the wallpaper's own resolution and aspect
+            // ratio, so on an output smaller than the wallpaper it is scaled
+            // *down* to fit. `PreserveAspectCrop` rather than `Stretch` because
+            // the two surfaces must be scaled *identically* — any difference
+            // between them shows up as a seam along the subject's silhouette.
+            Image {
+                id: backdrop
+
+                // Sized to the VIEWPORT, not to the enlarged box — see the note
+                // on `container`. Centring it in the box keeps it on screen at
+                // rest and aligned with DepthForeground's copy.
+                width: parent.width - 2 * root.overscan
+                height: parent.height - 2 * root.overscan
+                anchors.centerIn: parent
+
+                source: root.backgroundPath !== "" ? "file://" + root.backgroundPath : ""
+                fillMode: Image.PreserveAspectCrop
+                // The cache is keyed by URL, and a regenerated image keeps the
+                // same URL, so a changed file would be served from the old
+                // texture. The daemon gives every generation a distinct path, but
+                // disabling the cache also avoids holding two full-resolution
+                // textures per output.
+                cache: false
+                asynchronous: true
+                smooth: true
+            }
+
+            // Matching DMS's own overview blur exactly, so the shared backdrop
+            // is indistinguishable from what the user sees with this plugin off.
+            // The parameters are `WallpaperBackground.qml`'s
+            // `overviewBlurLoader`: blur 0.8, blurMax 75, autoPaddingEnabled
+            // false.
+            //
+            // `autoPaddingEnabled: false` matters: with padding on the effect
+            // grows the item to make room for the blur, which shifts and shrinks
+            // the image relative to the crisp state and reads as a zoom on every
+            // overview toggle.
+            //
+            // Inside `container` rather than outside it, so the blurred result
+            // moves with the image and is clipped by the same box.
+            Loader {
+                anchors.fill: parent
+                active: root.blurred && root.active
+
+                sourceComponent: MultiEffect {
+                    anchors.fill: parent
+                    source: backdrop
+                    blurEnabled: true
+                    blur: 0.8
+                    blurMax: 75
+                    autoPaddingEnabled: false
+                }
+            }
         }
     }
-
 }

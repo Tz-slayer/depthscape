@@ -78,6 +78,133 @@ PluginSettings {
 
     StyledText {
         width: parent.width
+        text: "Parallax"
+        color: Theme.surfaceText
+        font.pixelSize: Theme.fontSizeLarge
+        font.weight: Font.Bold
+        topPadding: Theme.spacingL
+    }
+
+    StyledText {
+        width: parent.width
+        text: "Moving between workspaces slides the scene: the subject and the background move in opposite directions, which reads as depth. It is a cumulative offset, not a per-key animation — stepping away and stepping back returns the scene to exactly where it started. Widgets never move; they are the thing the subject stands in front of, so they are the reference frame the depth is measured against."
+        color: Theme.surfaceVariantText
+        font.pixelSize: Theme.fontSizeSmall
+        wrapMode: Text.WordWrap
+        topPadding: Theme.spacingS
+    }
+
+    ToggleSetting {
+        settingKey: "parallaxEnabled"
+        label: "Navigation parallax"
+        description: "Slide the foreground and background as you move between workspaces and columns"
+        defaultValue: true
+    }
+
+    SliderSetting {
+        settingKey: "parallaxStepVertical"
+        label: "First vertical step"
+        description: "How far the scene moves on the first workspace step, as a percentage of the screen height"
+        defaultValue: 60
+        minimum: 0
+        maximum: 200
+        unit: "‰"
+    }
+
+    SliderSetting {
+        settingKey: "parallaxStepHorizontal"
+        label: "First horizontal step"
+        description: "How far the scene moves on the first column step, as a percentage of the screen width"
+        defaultValue: 80
+        minimum: 0
+        maximum: 200
+        unit: "‰"
+    }
+
+    SliderSetting {
+        settingKey: "parallaxTravel"
+        label: "Total travel"
+        description: "The distance the scene asymptotically approaches, as a percentage of the longer screen edge. Each step moves less than the one before, so this is a limit rather than a distance actually reached"
+        defaultValue: 12
+        minimum: 0
+        maximum: 30
+        unit: "%"
+    }
+
+    SliderSetting {
+        settingKey: "parallaxBackgroundRatio"
+        label: "Background travel"
+        description: "Background movement as a fraction of the foreground's. Smaller values deepen the effect; zero pins the background and makes the subject look pasted on"
+        defaultValue: 35
+        minimum: 0
+        maximum: 100
+        unit: "%"
+    }
+
+    ToggleSetting {
+        settingKey: "parallaxInverted"
+        label: "Invert direction"
+        description: "Step down in the workspace stack and the scene moves down instead of up"
+        defaultValue: false
+    }
+
+    SliderSetting {
+        settingKey: "parallaxDuration"
+        label: "Motion smoothing"
+        description: "Time constant of the smoothing applied to the offset. Higher is calmer and more floaty, lower follows the keyboard more tightly"
+        defaultValue: 350
+        minimum: 0
+        maximum: 1000
+        unit: "ms"
+    }
+
+    StyledText {
+        width: parent.width
+        text: "Overview"
+        color: Theme.surfaceText
+        font.pixelSize: Theme.fontSizeLarge
+        font.weight: Font.Bold
+        topPadding: Theme.spacingL
+    }
+
+    StyledText {
+        width: parent.width
+        text: "In the overview all three layers stay mapped and fade together. Unmapping the subject instead would leave the overview cleaner, but it pops: the compositor has to rebuild the backdrop in one frame."
+        color: Theme.surfaceVariantText
+        font.pixelSize: Theme.fontSizeSmall
+        wrapMode: Text.WordWrap
+        topPadding: Theme.spacingS
+    }
+
+    ToggleSetting {
+        settingKey: "fadeInOverview"
+        label: "Fade in the overview"
+        description: "Dim the subject and widgets while the overview is open"
+        defaultValue: true
+    }
+
+    SliderSetting {
+        settingKey: "overviewOpacity"
+        label: "Overview opacity"
+        description: "How much of the layers is left while the overview is open"
+        defaultValue: 120
+        minimum: 0
+        maximum: 1000
+        unit: "‰"
+    }
+
+    SliderSetting {
+        settingKey: "overviewFadeDuration"
+        label: "Fade duration"
+        description: "Cross-fade time when the overview opens or closes"
+        defaultValue: 240
+        minimum: 0
+        maximum: 1000
+        unit: "ms"
+    }
+
+    StyledText {
+        width: parent.width
         text: "Widgets"
         color: Theme.surfaceText
         font.pixelSize: Theme.fontSizeLarge

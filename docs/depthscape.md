@@ -166,16 +166,22 @@ Depth Map
 切换 workspace / column 时，按相对深度施加不同方向的位移：
 
 ```text
-niri 导航事件
+niri 导航事件（轮询）
     │
     ▼
-累计偏移（钳制在 maxTravel 内）
+累计步数 steps（**不钳制**）
+    │
+    ▼
+减速曲线 offset(steps)，钳制在 ±reserve
     │
     ├── Foreground: +offset
-    └── Background:  reverse
+    └── Background: -offset × 0.35
 ```
 
 最终形成近景移动快、远景移动慢的空间感。
+
+**已实现（2026-09-21），见 §14.7。** 与初版设计的差异：位移是**累计状态**而非
+逐次动画；只有前景与背景两层动，**widget 不动**；水平轴在空 workspace 上静止。
 
 ---
 
@@ -309,13 +315,19 @@ Cached Depth / Refined / Split
        QtQuick / GPU
             │
             ├── Widget Occlusion
-            ├── Parallax
-            ├── Shader
-            └── Animation
-            │
-            ▼
-         Display
+            ├── Parallax ←────────────────┐
+            ├── Shader                    │
+            └── Animation                 │
+            │                             │
+            ▼                             │
+         Display                          │
+                                          │
+niri msg --json workspaces / windows ─────┘
+       （400ms 轮询，累计步数 → 每层偏移）
 ```
+
+视差这一路是**旁路**：它不改图像，只产出每层一个二维偏移。轮询而不是订阅，
+是因为插件上下文拿不到 compositor 服务（§14.7）。
 
 ---
 
@@ -589,16 +601,21 @@ DMS 的原生壁纸。
 等于背景值。因此每个输出一个 `stage`，`stageTimer` 每 32ms 推进一步。
 
 ```text
-DepthBackground     background.png        主体被挖掉的场景
+DepthBackground     background.png        主体被挖掉的场景       ← 视差：-s × 0.35
       ↓
-DepthWidgetHost     自研 widget（如时钟）   主体要遮挡的东西
+DepthWidgetHost     自研 widget（如时钟）   主体要遮挡的东西       ← 视差：不动
       ↓
-DepthForeground     foreground.png        主体，最后 map → 压在最上
+DepthForeground     foreground.png        主体，最后 map → 压在最上 ← 视差：+s
 ```
 
 `DepthForeground` 与 `DepthBackground` 都是纯粹的 `Image`（后者多一层纯色
 `Rectangle` 垫底 + 一个 overview 模糊用的 `MultiEffect` Loader）。
 **没有 `OpacityMask`、没有 `Qt5Compat.GraphicalEffects` 依赖**（§14.2）。
+
+**视差只有前景与背景两层参与**（§14.7）。每层外面套一个比视口大的容器，
+内部的 `Image` 仍按视口几何居中，容器整体按 `offset` 平移——这是"大画布"模型，
+**不是 `scale`**。widget 层完全不接偏移：它是主体站立的场景，是深度被读取时
+的参照系。
 
 #### overview 处理
 
@@ -697,8 +714,17 @@ Depthscape
 │
 ├── Parallax
 │   ├── Enable
-│   ├── Strength
-│   └── Max Offset
+│   ├── First Vertical Step
+│   ├── First Horizontal Step
+│   ├── Total Travel
+│   ├── Background Travel
+│   ├── Invert Direction
+│   └── Motion Smoothing
+│
+├── Overview
+│   ├── Fade In Overview
+│   ├── Overview Opacity
+│   └── Fade Duration
 │
 ├── Effects
 │   ├── Depth Blur
@@ -709,6 +735,11 @@ Depthscape
     ├── HDMI-A-1
     └── DP-1
 ```
+
+**已实现的部分**（`qml/DepthSettings.qml`，2026-09-21）：General 的 Enable /
+Auto Analyze、Occlusion 的 Threshold / Feather、Widgets 的 Enable 与布局文件
+提示、Model 的三个按钮、Parallax 与 Overview 两节。Cache Size 与 Displays
+两节尚未做。
 
 ---
 
@@ -722,14 +753,19 @@ depthscape/
 ├── plugin.json                 DMS Composite Plugin 清单
 │
 ├── qml/                        Shell 侧（QML / QtQuick）
-│   ├── DepthDaemon.qml         daemon：壁纸监听、任务队列、三 surface 分阶段映射
-│   ├── DepthBackground.qml     background 层背景 surface（填充图 + 纯色垫底）
-│   ├── DepthWidgetHost.qml     background 层 widget surface（自研桌面组件）
+│   ├── DepthDaemon.qml         daemon：壁纸监听、任务队列、三 surface 分阶段映射、视差分发
+│   ├── DepthBackground.qml     background 层背景 surface（大画布 + 反向位移）
+│   ├── DepthWidgetHost.qml     background 层 widget surface（自研桌面组件，不参与视差）
 │   ├── DepthClockWidget.qml    自研时钟组件
-│   ├── DepthForeground.qml     background 层前景 surface（straight alpha，点击穿透）
+│   ├── DepthForeground.qml     background 层前景 surface（straight alpha，点击穿透，参与视差）
+│   ├── DepthParallax.qml       per-output 视差控制器：轮询 niri、累计步数、输出偏移
+│   ├── DepthScrollMath.js      纯函数：减速曲线、margin、activeColumn、低通、透明度
 │   ├── DepthStatusWidget.qml   desktop：状态卡片
-│   ├── DepthSettings.qml       settings：阈值、羽化、动作按钮
+│   ├── DepthSettings.qml       settings：阈值、羽化、视差、overview、动作按钮
 │   └── StartupCheck.qml        校验引擎二进制是否存在
+│
+├── test/
+│   └── depthscrollmath.test.js `node test/…`，DepthScrollMath 的单元测试
 │
 ├── engine/                     Rust 侧
 │   ├── Cargo.toml
@@ -744,7 +780,12 @@ depthscape/
 │       └── pipeline.rs         端到端编排：深度 → 精修 → 拆图
 │
 ├── tools/
-│   └── make-preview.py         浏览器内的分层预览，免重启 shell 检查效果
+│   ├── make-preview.py         浏览器内的分层预览，免重启 shell 检查效果
+│   ├── bench.py                性能回归
+│   ├── verify-all.sh           整套回归（静态检查 + 引擎 + 三个实时验证）
+│   ├── verify-parallax.py      视差像素验证：四假设判别 + 背景比例扫描
+│   ├── verify-navigation.py    真实导航往返验证
+│   └── on-clear-workspace.sh   把屏幕走空再跑命令（screenshot-screen 会挪焦点）
 │
 └── docs/
     ├── depthscape.md           本文件
@@ -766,7 +807,8 @@ $XDG_DATA_HOME/depthscape/
 ```
 
 > 后续版本新增的能力（视差、Shader）应扩展 `qml/DepthForeground.qml` 与 `imageops.rs`，
-> 而不是引入新的顶层目录。
+> 而不是引入新的顶层目录。视差新增的 `DepthParallax.qml` / `DepthScrollMath.js`
+> 都在 `qml/` 内，符合这条。
 
 ---
 
@@ -812,12 +854,18 @@ Character
 
 ### V0.3 — Parallax
 
-- [ ] 鼠标视差
-- [ ] 深度相关位移
-- [ ] 平滑滤波
-- [ ] 最大位移限制
-- [ ] Lazy animation
-- [ ] Idle 时停止刷新
+**已完成（2026-09-21），实现细节见 §14.7。**
+
+- [x] 导航驱动的位移（workspace 竖直轴 + column 水平轴）
+- [x] 两层反向位移（前景 +s，背景 -s × 0.35）
+- [x] 减速曲线与累计状态（切回原位画面回原位）
+- [x] 平滑滤波（一阶低通，时长可调）
+- [x] 最大位移限制（钳制在 reserve 内）
+- [ ] 鼠标视差 —— 用户明确不要
+- [ ] 深度相关位移（逐像素按深度值加权，而非整层统一位移）
+- [x] Idle 时停止刷新（只在偏移变化时重绘）
+- [ ] overview 三层静息不透明度重新标定（当前沿用参考实现的 12%）
+- [ ] 设置页视差控件 —— 已加（8 个键）
 
 ---
 
@@ -1509,6 +1557,132 @@ rewind 到 1 而非 0，避免闪 DMS 壁纸），把串行映射重跑一遍。
 > staged mapping 不是一次性建立的关系：**任何让多个 surface 同时变为可见的
 > 状态转换**都会重新引入不确定性。overview 是目前唯一一处，但新增这类转换时
 > 要照同一个模式处理。
+
+---
+
+### 14.7 视差：一个大画布 + 一个偏移
+
+参考实现 `/home/tz/Downloads/github/test/wallpaper-parallax/`。核心模型只有一句话：
+
+```text
+margin(size, maxTravel) = size × (maxTravel + 0.001)   // 画布放大
+x: -marginX + offsetX                                  // 定位
+fillMode: PreserveAspectCrop
+```
+
+画布比视口大 `maxTravel`（本实现 12% 长边），于是任意方向都有备用像素；
+图像用 `PreserveAspectCrop` 填满画布，静止时多出来的部分在视口外，看不见。
+
+#### 为什么备用区必须是"容器放大"而不是 `scale`
+
+```qml
+// 错误：绕图像自身中心重采样
+Image { scale: 1 + eps }
+
+// 正确：容器放大，图像保持视口几何
+Item {
+    width:  viewport.width  + 2 * overscan
+    height: viewport.height + 2 * overscan
+    x: -overscan;  y: -overscan
+    Image { width: parent.width; height: parent.height }
+}
+```
+
+`scale` 以图像中心为原点，静止时把画面整体推离 `size × eps / 2` —— 在 5K 上
+是 **25+ 逻辑像素**，比视差行程还大。这是最容易写错、也最容易误判成"绑定没生效"
+的一处。
+
+#### 减速曲线
+
+```text
+offset(n) = -reserve × (1 - (1-f)^|n|) × sign(n)
+f         = step × size / reserve          // 上限 0.999
+```
+
+**步数 `n` 绝不 clamp**，clamp 只作用在 `offset()` 的输出上。理由：钳制步数会让
+"往回走一步"在边界处失效——步数记的是位置，偏移才是被限制的量。
+
+实测（2560×1440，DP-3）：
+
+| 量 | 值 |
+|---|---|
+| 竖直 reserve（12% 高） | 172.8 |
+| 竖直 first step（6% 高） | 86.4 |
+| 竖直 `f` | 0.5 |
+| 水平 reserve（12% 宽） | 307.2 |
+| 水平 first step（8% 宽） | 204.8 |
+| 水平 `f` | 0.667 |
+
+`vsteps=1 → offsetY = -86.4`，`vsteps=2 → +129.6`（增量 43.2 = 86.4 × 0.5，
+正是 `f=0.5` 的减速）。精确回程已验证。
+
+#### widget 为什么不参与
+
+用户明确要求 **"widget 暂时不要动"**，而且这不只是省事：widget 画在壁纸**上**，
+它是主体**站立的场景**——是深度被读取时所参照的那一层。让它跟着位移，主体与
+widget 之间就失去了参照差，视差读起来会像渲染故障而不是空间感。
+
+#### 插件里没有 compositor 服务
+
+**插件 daemon 里 `NiriService` / `CompositorService` 不可用。** 三段实测证据：
+daemon 本体 `isNiri: true`，同一 daemon 的子对象读到 `false`，变更信号从未到达。
+`NiriService.inOverview` 读作常量 `false` **且不报错**——静默失败。
+
+→ 解决：**轮询 `niri msg --json`**（`workspaces` + `windows`，400ms）。
+例外：`SettingsData.*` 可以正常读到。
+
+#### 空 workspace 上水平轴静止
+
+niri 不发出"聚焦列变了"事件，只发"聚焦窗口变了"，所以列号要从聚焦窗口的
+`layout.pos_in_scrolling_layout[0]` 反查。**空 workspace 没有聚焦窗口 → 没有列号
+→ 水平轴保持不动。** 这是设计的必然结果，不是 bug。
+
+两个轴必须解耦：切 workspace 会顺带把焦点移到另一个 workspace 的窗口上，如果不
+识别这种情况，一次竖直按键会同时推动两个轴。判据是"上次列所属的 workspace"——
+伴随 workspace 变化时只重立基准、不累计。
+
+#### 一个静默的 QML 陷阱
+
+```qml
+// 错误：别名遮蔽了它自己指向的目标，QML 无法解析，静默不传播
+readonly property alias tracker: tracker
+
+// 正确
+readonly property alias tracker: parallax
+DepthParallax { id: parallax }
+```
+
+这个错误表现为"偏移算出来了但到不了屏幕"，没有任何日志。
+
+#### 像素验证
+
+误差地板：5K 源图降采样去比 2.5K 屏幕，干净截图 MAE 地板 **0.67**；未屏蔽
+widget 与状态栏时 **9.4**。原始壁纸对同一屏幕也只有 **9.35** —— 所以**绝对阈值
+无意义**，只能比较假设之间的差距。
+
+四假设判别（强制偏移到 reserve，DP-3，2560×1440）：
+
+| 假设 | MAE |
+|---|---|
+| 什么都没动 | 22.370 |
+| 只动前景，背景静止 | 14.764 |
+| **前景 + 背景反向（实际发布）** | **4.170** |
+| 两层同向 | 23.277 |
+
+判别余量 **10.594**（地板 0.671）。背景比例扫描呈完美 V 形，最小值精确落在
+配置的 +0.35。
+
+**三个必须遵守的测量约定**（每一条都曾导致误判）：
+
+1. **采样必须双线性插值**，不能四舍五入到最近源像素——否则 107px 的位移被量化掉，
+   三路假设会完全并列（实测 4.184 / 4.184 / 4.184）。
+2. **必须屏蔽 widget 与 DMS 状态栏**。它们是后画的，层模型预测不了。
+3. **缓存文件路径要从 daemon 的 debug dump 取**，不能按 mtime 挑——缓存里可能有
+   **别的壁纸**（曾把地板从 2.1 虚高到 11.2）。
+
+工具：`tools/verify-parallax.py`（`--self-test` / `--sweep`）、
+`tools/verify-navigation.py`（真实导航往返）、`tools/on-clear-workspace.sh`
+（`screenshot-screen` 会挪焦点，必须先把屏幕走空）。
 
 ---
 
