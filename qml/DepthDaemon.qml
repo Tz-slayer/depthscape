@@ -27,6 +27,14 @@ PluginComponent {
     readonly property real threshold: thresholdPercent / 100
     readonly property real feather: featherPercent / 100
 
+    // DMS's own overview-blur preference. Our background is the shared backdrop,
+    // so it has to follow the same setting DMS applies to its wallpaper or the
+    // overview would look different with the plugin on than off. Read
+    // defensively: a plugin's view of DMS's singletons is not always complete
+    // (see the note on `inOverview`), and a missing property should mean "no
+    // blur" rather than a binding error on every frame.
+    readonly property bool blurInOverview: SettingsData.blurWallpaperOnOverview ?? true
+
     // Changing either parameter invalidates the image pair but not the depth
     // map, so this key is what decides whether a finished job is still worth
     // applying.
@@ -448,18 +456,20 @@ PluginComponent {
     // short-lived process every few hundred milliseconds, and none at all once
     // the state stops changing in a way anyone can see.
     //
-    // What the overview does with each surface:
+    // WHAT THE OVERVIEW SHOWS
     //
-    //   * The background stays mapped and blurs itself, matching DMS's own
-    //     wallpaper treatment so the overview looks untouched.
-    //   * The widgets and the foreground are hidden. A surface on the
-    //     `background` layer that is not in the backdrop is reproduced inside
-    //     every workspace card, so leaving them up would duplicate our clock
-    //     into each card — and the user's requirement is only that the person
-    //     need not appear.
+    // Our background surface **stays mapped** and *is* the shared backdrop: one
+    // image spanning every workspace card and the gaps between them, exactly
+    // like DMS's own wallpaper. Getting there needs the `place-within-backdrop`
+    // rule, not just the `background` layer — see DepthBackground.qml, which is
+    // where that distinction is written up.
     //
-    // This avoids `place-within-backdrop` entirely, which parks a surface
-    // underneath DMS's wallpaper and its blur and therefore makes it invisible.
+    // The widgets and the foreground hide. They carry the same rule, so if they
+    // stayed mapped they would join that same shared backdrop and put a clock
+    // and a cut-out subject behind every workspace card. A wallpaper is one
+    // image per screen and should read as one; the subject has no business
+    // floating in the overview. Hiding them also makes the overview match a
+    // session without this plugin, once the background is blurred to match.
     property bool inOverview: false
 
     Process {
@@ -472,6 +482,9 @@ PluginComponent {
                 const value = text.indexOf("open") !== -1 && text.indexOf("closed") === -1;
                 if (value !== root.inOverview)
                     root.inOverview = value;
+                // Nothing else to do here. Flipping `inOverview` changes which
+                // surfaces are wanted, and each output's `onWantedChanged`
+                // rewinds its own stage in response — one place, not two.
             }
         }
     }
@@ -705,56 +718,98 @@ PluginComponent {
 
                     required property var modelData
 
-                    // Which surfaces of this output are mapped so far. 0 = none,
-                    // 3 = all. Advanced by `stageTimer`, one step at a time.
+                    // Start the sequence the moment this output first wants a
+                    // surface, and re-run it on any transition that changes which
+                    // surfaces are mapped. Both cases matter:
+                    //
+                    //   * The images arrive after `Component.onCompleted`, so by
+                    //     the time `wanted` first becomes non-zero the timer has
+                    //     usually already walked the stage to 3 and stopped.
+                    //     Restarting without rewinding would find nothing left to
+                    //     advance and map all three in one turn.
+                    //   * Closing the overview brings the widgets and the
+                    //     foreground back, and those two must not map together
+                    //     either — measured as the background landing on top of
+                    //     the subject.
+                    //
+                    // Rewinding to 1 rather than 0 when the background is already
+                    // mapped is what keeps an overview toggle from flashing: the
+                    // background is wanted continuously, so unmapping it would
+                    // briefly expose the wallpaper DMS draws underneath.
+                    onWantedChanged: {
+                        if (wanted === 0)
+                            return;
+                        stage = (wantBackground && stage >= 1) ? 1 : 0;
+                        stageTimer.restart();
+                    }
+
+                    // Which surfaces of this output are mapped so far. 0 = none.
+                    // Advanced by `stageTimer`, one step at a time.
                     property int stage: 0
+
+                    // How many surfaces this output wants mapped right now. Only
+                    // used to decide whether the sequence is worth running at all:
+                    // the stage walk itself always goes to 3, so that a disabled
+                    // widget cannot stall the foreground behind it.
+                    readonly property int wanted: (wantBackground ? 1 : 0)
+                        + (wantWidgets ? 1 : 0) + (wantForeground ? 1 : 0)
 
                     // The delegates have no stable id to address them by, and
                     // `Variants` is a C++ type whose internals are not part of
                     // its contract, so the group registers itself instead of
                     // being searched for. Clearing the group first keeps a
                     // rebuild from leaving stale entries behind.
-                    Component.onCompleted: {
-                        root.surfaceGroups.push(surfaces);
-                        stageTimer.start();
-                    }
+                    //
+                    // No need to start the stage timer here: at construction the
+                    // images have not been generated yet, so `wanted` is 0 and
+                    // any sequence would run to completion against nothing.
+                    // `onWantedChanged` starts it when there is something to map.
+                    Component.onCompleted: root.surfaceGroups.push(surfaces)
                     Component.onDestruction: {
                         const at = root.surfaceGroups.indexOf(surfaces);
                         if (at >= 0)
                             root.surfaceGroups.splice(at, 1);
                     }
 
-                    // Never show anything whose image is not ready yet: an empty
-                    // `background` layer surface in the overview produces an
-                    // empty card, and a visible-but-empty window still costs a
-                    // compositor surface.
-                    //
-                    // The background is the exception to the "hide in overview"
-                    // rule. Hiding it would leave the overview showing DMS's own
-                    // crisp wallpaper with our widgets floating over it; instead
-                    // it stays mapped and blurs itself with the same parameters
-                    // DMS uses, so the overview reads exactly as it would without
-                    // us. The widgets and the foreground do hide — a wallpaper is
-                    // one image on one screen, and duplicating our clock into
-                    // every workspace card (which is what staying mapped would
-                    // do) is the thing this architecture exists to avoid.
+                    // Never show anything whose image is not ready yet: a
+                    // visible-but-empty window still costs a compositor surface,
+                    // and in the overview it would be an empty hole in the
+                    // shared backdrop.
                     readonly property bool wantForeground: root.effectEnabled
                         && !root.inOverview
                         && root.foregroundFor(modelData.name) !== ""
+                    // Deliberately NOT gated on `inOverview`. This surface *is*
+                    // the shared backdrop, so it has to stay mapped for the
+                    // overview to have anything behind its workspace cards. It is
+                    // the only one of the three that survives the overview.
                     readonly property bool wantBackground: root.effectEnabled
                         && root.backgroundFor(modelData.name) !== ""
                     readonly property bool wantWidgets: root.effectEnabled
                         && root.widgetsEnabled
                         && !root.inOverview
 
+                    // Each surface is mapped on its own step, in dependency order,
+                    // so the compositor is handed one window at a time and the
+                    // stack follows this order deterministically. A surface whose
+                    // predecessor is absent simply maps on the next tick — the
+                    // order between the three is what matters, not the tick count.
+                    readonly property bool showBackground: stage >= 1 && wantBackground
+                    readonly property bool showWidgets: stage >= 2 && wantWidgets
+                    readonly property bool showForeground: stage >= 3 && wantForeground
+
                     // 1. Background — the scene with the subject cut out.
+                    //
+                    // Stays mapped in the overview and blurs itself there, so the
+                    // shared backdrop matches what DMS does with its own
+                    // wallpaper. DMS's setting is the one that decides: if the
+                    // user has overview blur off, ours stays crisp too.
                     DepthBackground {
                         targetScreen: surfaces.modelData
-                        backgroundPath: surfaces.wantBackground
+                        backgroundPath: surfaces.showBackground
                             ? root.backgroundFor(surfaces.modelData.name)
                             : ""
-                        blurred: root.inOverview
-                        visible: surfaces.stage >= 1 && surfaces.wantBackground
+                        blurred: root.inOverview && root.blurInOverview
+                        visible: surfaces.showBackground
                     }
 
                     // 2. Widgets — the clock the subject stands in front of.
@@ -765,17 +820,17 @@ PluginComponent {
                     DepthWidgetHost {
                         targetScreen: surfaces.modelData
                         layoutPath: root.layoutPath
-                        widgetsEnabled: surfaces.stage >= 2 && surfaces.wantWidgets
-                        visible: surfaces.stage >= 2 && surfaces.wantWidgets
+                        widgetsEnabled: surfaces.showWidgets
+                        visible: surfaces.showWidgets
                     }
 
                     // 3. Foreground — the subject, mapped last means on top.
                     DepthForeground {
                         targetScreen: surfaces.modelData
-                        foregroundPath: surfaces.wantForeground
+                        foregroundPath: surfaces.showForeground
                             ? root.foregroundFor(surfaces.modelData.name)
                             : ""
-                        visible: surfaces.stage >= 3 && surfaces.wantForeground
+                        visible: surfaces.showForeground
                     }
                 }
             }
@@ -783,12 +838,21 @@ PluginComponent {
     }
 
     // Walks every output's group from stage 0 to 3, one surface per tick.
+    //
+    // This is what establishes the stacking order inside the shared backdrop:
+    // surfaces stack by map order, so handing the compositor one window per tick
+    // is the only way to make "background under widgets under subject" hold. Each
+    // delegate's `onWantedChanged` rewinds its own stage to re-run this.
     Timer {
         id: stageTimer
 
         interval: 32
         repeat: true
         onTriggered: {
+            // Walk every group to stage 3 unconditionally. Gating the advance on
+            // which surfaces are actually wanted would stall: a disabled widget
+            // would leave the foreground waiting for a step that never comes.
+            // The surfaces themselves decide whether their stage means anything.
             let advanced = false;
             for (const group of root.surfaceGroups) {
                 if (group.stage < 3) {
@@ -833,16 +897,47 @@ PluginComponent {
     // top of a group that mapped earlier. Re-creating our surfaces after it has
     // had time to land puts us above it again.
     //
+    // WHY THE BACKDROP MAKES THIS A RACE
+    //
+    // DMS's wallpaper lives in the same shared backdrop as our three surfaces:
+    // its generated `dms:blurwallpaper` rule and the user's `^quickshell$` rule
+    // both set `place-within-backdrop`, and so does our `^depthscape:` rule.
+    // niri renders that backdrop in *map* order — `layers_in_render_order` in
+    // niri.rs walks `layer_map.layers_on(Layer::Background).rev()`, so whichever
+    // surface was mapped last draws on top. "Who wins the backdrop" is therefore
+    // a question of *when*, not of layer: all four surfaces are on the same
+    // layer, and the last one mapped is the one visible.
+    //
+    // DMS rebuilds its wallpaper when `pluginReadyKey` changes, which follows the
+    // plugin list finishing its load — after this daemon has already mapped its
+    // own surfaces. There is no event to wait on from here: a plugin's view of
+    // DMS's services is reduced (see the note on `inOverview`), and the wallpaper
+    // is not owned by anything this daemon can observe. So the stack is
+    // re-asserted a few times across the window in which DMS settles. The cost of
+    // a late raise is one frame of discontinuity; the cost of missing it is our
+    // composite being covered by DMS's wallpaper while every one of our surfaces
+    // still reports itself healthy — invisible failure, and much worse to
+    // diagnose. Measured: with a single raise at 3s the composite loses that race
+    // and only the widgets remain visible; re-raising holds it.
+    //
     // 3000ms is a bound, not a synchronisation: DMS's own sequence is an image
     // load followed by a few settle frames, and a 5K wallpaper has been measured
-    // at ~900ms end to end on this machine. The cost of being late is a brief
-    // flash of DMS's wallpaper at startup; the cost of being early is the effect
-    // never appearing at all, which is much worse.
+    // at ~900ms end to end on this machine.
     Timer {
+        id: startupRaise
+
         interval: 3000
         running: true
-        repeat: false
-        onTriggered: root.raiseSurfaces()
+        repeat: true
+        property int fired: 0
+        // Four attempts span 3s..12s. Enough to cover DMS's settle and its
+        // plugin-driven rebuild; short enough that a user never notices.
+        onTriggered: {
+            root.raiseSurfaces();
+            fired += 1;
+            if (fired >= 4)
+                startupRaise.stop();
+        }
     }
 
     Component.onCompleted: {

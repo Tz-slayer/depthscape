@@ -40,7 +40,7 @@ PluginSettings {
 
     StyledText {
         width: parent.width
-        text: "Depthscape draws its own background, so turn the DMS wallpaper off while this is enabled — otherwise the two are drawn on top of each other."
+        text: "Depthscape needs a niri layer rule to share the overview backdrop, otherwise every workspace card gets its own copy of the wallpaper. See the README. DMS's own wallpaper may be left on as a fallback while Depthscape's images decode."
         color: Theme.surfaceVariantText
         font.pixelSize: Theme.fontSizeSmall
         wrapMode: Text.WordWrap

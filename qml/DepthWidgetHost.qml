@@ -12,10 +12,11 @@ import qs.Common
 // reasons that are both structural rather than cosmetic:
 //
 //   1. They live on the `bottom` layer (DesktopPluginWrapper.qml, the default
-//      branch of WlrLayershell.layer). Depthscape's background and foreground
-//      are on `background`, which is strictly below `bottom`, so a DMS widget
-//      could never be occluded by the subject — the one effect this plugin
-//      exists to produce.
+//      branch of WlrLayershell.layer). Depthscape's three surfaces are on
+//      `background`, the layer *below* `bottom`, so a DMS widget would always
+//      draw over the subject. See DepthBackground.qml for why `background` plus
+//      a `place-within-backdrop` rule is the arrangement that keeps the overview
+//      from duplicating the wallpaper into every card.
 //   2. They are instantiated per workspace card, so the same clock appears in
 //      every workspace. A wallpaper is one image on one screen; it should not
 //      be duplicated.
@@ -186,4 +187,5 @@ PanelWindow {
             return Qt.resolvedUrl("DepthClockWidget.qml");
         return "";
     }
+
 }

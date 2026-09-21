@@ -22,6 +22,11 @@ import Quickshell.Wayland
 // draws above both — that is what puts the subject in front of the clock and
 // gives the wallpaper its depth. DepthDaemon owns that sequencing; this file
 // only has to be a correctly-behaved surface.
+//
+// `background` plus the `place-within-backdrop` rule, not `bottom`: see
+// DepthBackground.qml for the whole argument. The short version is that the rule
+// is what makes the surface shared across workspace cards instead of cloned into
+// each one.
 PanelWindow {
     id: root
 
@@ -67,4 +72,5 @@ PanelWindow {
         asynchronous: true
         smooth: true
     }
+
 }

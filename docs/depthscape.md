@@ -100,8 +100,8 @@ Foreground / Background Split
         └──► background.png   （填充后的背景，不透明）
 ```
 
-桌面最终采用如下分层（三个 surface 都落在 layer-shell 的 `bottom` 层，
-按 map 顺序自下而上）：
+桌面最终采用如下分层（三个 surface 都落在 layer-shell 的 `background` 层，
+**且共用一条 `place-within-backdrop` 规则**，按 map 顺序自下而上）：
 
 ```text
 DepthForeground     ← 主体，straight alpha
@@ -202,7 +202,7 @@ flowchart TB
         SPLIT[Splitter]
     end
 
-    subgraph LAYERS[background 层，按 map 顺序]
+    subgraph LAYERS[background 层 + 共享 backdrop，按 map 顺序]
         BG[DepthBackground<br/>depthscape:background]
         WH[DepthWidgetHost<br/>depthscape:widgets]
         FG[DepthForeground<br/>depthscape:foreground]
@@ -241,14 +241,26 @@ flowchart TB
     FG --> DISPLAY
 ```
 
-三层的堆叠关系是这套实现的核心。`background` 层的 surface 按 **map 顺序**
-堆叠，最后 map 的在最上，而 wlr-layer-shell **没有 raise 请求**——所以
-`DepthDaemon` 必须**分阶段**（stage 0→3，每 32ms 一步）把三个窗口交给
+三层的堆叠关系是这套实现的核心。**三个 surface 同在 `background` 层，且共用
+一条 `place-within-backdrop true` 规则**，因此它们都在 overview 的共享 backdrop
+里、按 **map 顺序**堆叠，最后 map 的在最上。wlr-layer-shell **没有 raise 请求**
+——所以 `DepthDaemon` 必须**分阶段**（stage 0→3，每 32ms 一步）把三个窗口交给
 compositor，否则顺序不确定。这是实测结论，不是推断，见 §14.1。
 
+**注意 `background` 层 ≠ 共享 backdrop。** 这是两个必须分开的概念：前者是
+layer-shell 的层（`background < bottom < top < overlay`），后者是 `background`
+层**内部**的一个子概念（overview 里跨所有 card 与间隙的那一张底图）。光在
+`background` 层不够——**必须命中那条规则**，否则 surface 被当成普通 background
+surface，在 overview 里**逐卡片克隆**。详见 §14.6。
+
+**同一个 backdrop 里还有 DMS 的原生壁纸**（用户 `config.kdl` 的
+`^quickshell$` 规则），它在 `pluginReadyKey` 变化时重建、会排到我们之上。
+这是 §14.6 里 `startupRaise` 必须重试多次的原因。
+
 `DepthWidgetHost` 是 Depthscape **自研**的 widget 宿主，不是 DMS 的桌面
-Widget。DMS 的桌面 Widget 在 `bottom` 层（严格高于 `background`），永远不会
-被主体遮挡，且会被复制进 overview 的每个 workspace card。见 §14.1 与 §14.5。
+Widget。DMS 的桌面 Widget 在 `bottom` 层（**比我们高**，永远画在主体之上），
+而且按 workspace card 实例化，同一个时钟会在每个 workspace 各出现一次。
+见 §14.1 与 §14.5。
 
 ---
 
@@ -327,9 +339,9 @@ Cached Depth / Refined / Split
 | V2/V3 通信   | Unix Domain Socket          | 实时视差/长期 daemon                 |
 | V3 GPU     | **WGSL + wgpu**             | 2.5D / Parallax / Shader       |
 
-V1 **不引入任何额外 QML 模块**。合成所需的 `MultiEffect`（仅用于 overview
-模糊）来自 stock Qt 的 `QtQuick.Effects`；前景与背景就是两张普通
-`Image`，靠 layer-shell 的 map 顺序堆叠（§14.1）。历史上曾需要
+V1 **不引入任何额外 QML 模块**。前景与背景就是两张普通
+`Image`，靠 layer-shell 的 map 顺序堆叠（§14.1）；overview 里三个 surface
+全隐藏，由 DMS 自己的壁纸负责那层背景（§14.6）。历史上曾需要
 `Qt5Compat.GraphicalEffects` 的 `OpacityMask` 来合成遮罩，拆图方案落地后
 该依赖已删除（原因见 §14.2）。
 
@@ -565,9 +577,10 @@ box_blur_rgb(source, r, 3 passes)           近似高斯，用于填洞
 
 ### 7.5 Compositor（三个 surface）
 
-负责实时桌面效果。三个 `PanelWindow` 全在 **`bottom` 层**（放 `background`
-会被 DMS 的 Widget 盖住，放 `top` 会盖住普通窗口），按 map 顺序叠，
-由 `DepthDaemon` **分阶段**（stage 0→3）映射。
+负责实时桌面效果。三个 `PanelWindow` 全在 **`background` 层**，且共用一条
+`place-within-backdrop true` 规则（§14.6），按 map 顺序叠，
+由 `DepthDaemon` **分阶段**（stage 0→3）映射，并在启动后**多次重建**以抢过
+DMS 的原生壁纸。
 
 **为什么必须分阶段**：同一组件树里的多个 `PanelWindow` 是同时创建的，
 各自按 Wayland 对象就绪时机**异步 map**，声明顺序不保证等于 compositor
@@ -583,24 +596,37 @@ DepthWidgetHost     自研 widget（如时钟）   主体要遮挡的东西
 DepthForeground     foreground.png        主体，最后 map → 压在最上
 ```
 
-`DepthForeground` 是一个纯粹的 `Image`，`DepthBackground` 多一个
-`MultiEffect` 用于 overview 模糊。**没有 `OpacityMask`、没有
-`Qt5Compat.GraphicalEffects` 依赖**（§14.2）。
+`DepthForeground` 与 `DepthBackground` 都是纯粹的 `Image`（后者多一层纯色
+`Rectangle` 垫底 + 一个 overview 模糊用的 `MultiEffect` Loader）。
+**没有 `OpacityMask`、没有 `Qt5Compat.GraphicalEffects` 依赖**（§14.2）。
 
 #### overview 处理
 
-- **背景**：保持 map，按 DMS 自己的参数模糊
-  （`blur: 0.8` / `blurMax: 75` / `autoPaddingEnabled: false`，
-  取自 `WallpaperBackground.qml` 的 `overviewBlurLoader`），
-  使 overview 看起来与没有本插件时一致。`autoPaddingEnabled: false`
-  是必须的——开着会让 effect 撑大 item，切换 overview 时画面会缩放。
-- **widget 与前景**：**隐藏**。`background` 层上不在 backdrop 里的 surface
-  会被复制进 overview 的每个 workspace card，而壁纸是一屏一张，
-  不该重复；用户的要求也只是"overview 里不需要看到人物"。
+**背景保持 map 并自模糊——它*就是*那块共享 backdrop。**
+
+- 三个 surface 都命中 `^depthscape:` 的 `place-within-backdrop` 规则，因此在
+  overview 里**共享同一张底图**，而不是被逐 card 克隆（§14.6）。
+- **widget 与前景在 overview 里 unmap**（`want*` 置 false）。它们带同一条规则，
+  留 map 会一起进那个共享 backdrop，于是每个 card 后面都浮着一个时钟和一个人物。
+  壁纸是一屏一张图，应该读作一张；主体没有理由飘在 overview 里。
+- **背景不 unmap**：它是 backdrop 唯一的内容，撤掉就没有底图了。
+  它跟随 `SettingsData.blurWallpaperOnOverview` 自模糊，参数与
+  DMS 的 `overviewBlurLoader` 逐项一致（blur 0.8 / blurMax 75 /
+  `autoPaddingEnabled: false`）。
+
+副产品是 **overview 与 DMS 壁纸在 backdrop 里的表现一致**——用户看到的
+还是一张连续模糊壁纸，只是这张由我们提供。
+
 - **`inOverview` 从 compositor 轮询**（`niri msg overview-state`，350ms）。
   `NiriService.inOverview` 在插件上下文里读作常量 `false` 且不报错——
-  插件拿到的 service 树是残缺的。
-
+  插件拿到的 service 树是残缺的。但 `SettingsData.blurWallpaperOnOverview`
+  是可以读到的。
+- **退出 overview 必须重新分阶段**。三个 `visible` 绑定会在同一轮事件循环
+  里一起翻成 `true`，于是三个窗口同时 map、顺序又变回不确定——实测表现为
+  **背景压在前景之上**（不透明区 vs 背景 MAE 1.11、vs 前景 58.01）。
+  修法在 `onWantedChanged` 里**先 rewind stage 再 restart**（背景已 map 时
+  rewind 到 1 而非 0，避免闪 DMS 壁纸），让映射重新串行。修复后同一判据变成
+  vs 前景 1.68、vs 背景 56.34。
 V2：
 
 ```text
@@ -697,10 +723,10 @@ depthscape/
 │
 ├── qml/                        Shell 侧（QML / QtQuick）
 │   ├── DepthDaemon.qml         daemon：壁纸监听、任务队列、三 surface 分阶段映射
-│   ├── DepthBackground.qml     bottom 层背景 surface（填充图 + overview 模糊）
-│   ├── DepthWidgetHost.qml     bottom 层 widget surface（自研桌面组件）
+│   ├── DepthBackground.qml     background 层背景 surface（填充图 + 纯色垫底）
+│   ├── DepthWidgetHost.qml     background 层 widget surface（自研桌面组件）
 │   ├── DepthClockWidget.qml    自研时钟组件
-│   ├── DepthForeground.qml     bottom 层前景 surface（straight alpha，点击穿透）
+│   ├── DepthForeground.qml     background 层前景 surface（straight alpha，点击穿透）
 │   ├── DepthStatusWidget.qml   desktop：状态卡片
 │   ├── DepthSettings.qml       settings：阈值、羽化、动作按钮
 │   └── StartupCheck.qml        校验引擎二进制是否存在
@@ -995,7 +1021,9 @@ QML 中的 `z: 999` 只对同一个 QtQuick scene / surface 内部有效，
 
 **结论：不需要 patch DMS，靠 layer-shell 的层级 + 同层 map 顺序即可实现。**
 
-> **V0.3 起三个 surface 全在 `background` 层**，不需要任何用户侧 niri 配置。
+> **三个 surface 全在 `background` 层，且共用一条 `place-within-backdrop`
+> 规则。** 那条规则**必须由用户手动加进 niri 配置**（插件加不了），
+> 否则概述里会出现逐卡片克隆的壁纸。详见 §14.6。
 > 曾经的 `backgroundLayer` 开关随旧架构一起删除——现在不再是
 > "前景盖不盖 widget"的取舍问题，而是三层各自有序。
 
@@ -1033,25 +1061,31 @@ background  <  bottom  <  top  <  overlay
         普通应用窗口由合成器放在 bottom 与 top 之间
 ```
 
-#### 同层顺序：map 顺序
+#### 同层顺序：map 顺序 —— backdrop 里也一样
 
-DMS 的桌面 Widget 落在 **`bottom`** 层，与 depthscape 的三个 surface **同层**，
-因此层间顺序不足以定位它们的关系，必须依赖同层排序规则。
-
-**实测结论（niri 26.04 + smithay）：同层内按 map 顺序堆叠，最后 map 的 surface 在最上层。**
+**实测结论（niri 26.04 + smithay）：同层内按 map 顺序堆叠，最后 map 的
+surface 在最上层。这条规则对 backdrop 内部同样成立。**
 
 机制在 niri 源码里是显式的 —— `src/niri.rs`：
 
 ```rust
 fn layers_in_render_order(...) {
     // LayerMap returns layers in reverse stacking order.
-    layer_map.layers_on(layer).rev().filter_map(...)
+    layer_map.layers_on(layer).rev().filter_map(|surface| {
+        if for_backdrop != mapped.place_within_backdrop() { return None; }
+        ...
+    })
 }
 ```
 
 `layers_on()` 来自 smithay 的 `LayerMap`，其 `layers` 字段是
 `IndexSet<LayerSurface>`，`map_layer()` 以 `insert` 追加。
 `.rev()` 之后按「底 → 顶」的顺序压入渲染列表，于是**后 map 者后画、因而在最上**。
+
+**同一个 `layers_in_render_order` 也服务于 backdrop**（`render_layer_normal`
+与 `render_layer_popups` 都走它，靠 `for_backdrop` 参数过滤成员）。所以
+backdrop 里的相对顺序 = map 顺序，**与 layer 无关**——所有 backdrop 成员都在
+同一个 `background` 层。这解释了为什么"换个 layer"从来不是杠杆。
 
 DMS 自己就依赖这条规则，并在源码里写明了 —— `Modules/DesktopWidgetLayer.qml`：
 
@@ -1065,19 +1099,24 @@ values: [...(SettingsData.desktopWidgetInstances || [])].reverse()
 
 #### 由此确定的设计约束
 
-**1. 三个 surface 全在 `bottom` 层。** 放 `background` 会被 DMS 的 Widget 盖住，
-放 `top` / `overlay` 会盖住普通应用窗口。`bottom` 是唯一能让「背景 < widget <
-前景」这条链自洽、又不侵入应用窗口的层级。
+**1. 三个 surface 全在 `background` 层，且共用一条 `place-within-backdrop`
+规则。** 放 `bottom` / `top` / `overlay` 都会退出 backdrop，从而在 overview 里
+被逐卡片克隆（§14.6）。三个全进 backdrop 之后，"背景 < widget < 前景"
+这条链由**同层 map 顺序**保证（见下）。
 
 > 曾经的 `backgroundLayer` 开关随旧架构一起删除——那是在「前景盖不盖 widget」
 > 之间的取舍，因为当时只有一个 surface。现在三层各自有序，不是取舍问题。
 
 **2. 同层内必须抢 map 顺序，且要分阶段。** 见上文「同层堆叠：map 顺序，且必须分阶段」。
 
+**3. 还要抢过 DMS 的原生壁纸。** 它也在同一个 backdrop 里（`^quickshell$`
+规则），而且会在 `pluginReadyKey` 变化时重建、排到我们之上。这是
+`startupRaise` 多次重试存在的原因（§14.6）。**这一条是本层最容易漏掉的竞争。**
+
 `wlr-layer-shell` 没有「raise」请求，唯一手段是销毁并重建 surface
 （`unmap` 会把 surface 从 `LayerMap` 中移除，重新 `map` 即追加到末尾）。
 DMS 在 Widget 列表变化时会重建它自己的全部 Widget surface，
-届时 `bottom` 层上的 depthscape surface 会被压在后面，因此 `DepthDaemon` 监听
+届时 depthscape 的 surface 会被压在后面，因此 `DepthDaemon` 监听
 `SettingsData.desktopWidgetInstances`，等 DMS 自己的去抖（150ms + 32ms）结束后
 再重建整组 surface。
 
@@ -1095,32 +1134,40 @@ onPluginReadyKeyChanged: rebuildDebounce.restart()   // 插件的桌面组件加
 这个 bug 只有在真实会话里装上插件才会暴露，夹具（三个 surface 同一时刻创建）
 测不出来。
 
-修法是监听 DMS 用的同一个属性，再加一个启动兜底：
+**同一时刻，DMS 的原生壁纸也在做同样的事**，而且它和我们在**同一个 backdrop**
+里（§14.6），所以它排到我们之上时症状更难看——整张合成被一张清晰的壁纸盖掉。
+
+两者都只能靠重建 surface 来应对，而**没有任何事件可以从插件侧观察到它们**
+（插件看到的 DMS service 是残缺的，见 §14.5 关于 `NiriService` 的说明）。
+所以当前实现是**在一个时间窗口内重试若干次**：
 
 ```qml
-Connections {
-    target: PluginService
-    function onPluginDesktopComponentsChanged() { widgetRebuildTimer.restart(); }
+Timer {
+    id: startupRaise
+    interval: 3000
+    running: true
+    repeat: true
+    property int fired: 0
+    // 3s..12s，覆盖 DMS 的 settle 与其插件驱动的重建
+    onTriggered: {
+        root.raiseSurfaces();
+        fired += 1;
+        if (fired >= 4) startupRaise.stop();
+    }
 }
-
-// 兜底：上面那条信号可能在本 daemon 构造之前就发过了，
-// 冷启动时首个拆图也可能晚于它。延迟再顶一次，两种情况都覆盖。
-Timer { interval: 3000; running: true; repeat: false
-        onTriggered: root.raiseSurfaces() }
 ```
 
-兜底是无害的：如果 surface 尚未 map，`raiseSurfaces()` 是空操作；
-而拆图就绪时 surface 自然会最后 map、因而在最上。
-
-日常主路径不需要额外处理：换壁纸时 `foregroundPath` 先被清空、当前
-`stageTimer` 会重跑一轮，新图就绪后重新 map，自然处于最上层。
+**为什么不是一次**：3 秒单次实测会输给 DMS 壁纸的重建，表现为"三个 surface
+全都健康、`niri msg layers` 里都在、日志无报错，但屏幕上是 DMS 的原生壁纸"。
+代价是重建期间可能有一帧不连续；漏掉的代价是效果**静默消失**，后者难查得多。
 
 时间预算：DMS 在 `orderSignature` 变化后先等 `rebuildDebounce` 150ms、
 再等 `rebuildApply` 32ms 才把 `rebuilding` 置回 `false`，其新 surface
-大约在 182ms 时 map；depthscape 等到 400ms 再动，加自身分阶段映射
-（3 步 × 32ms ≈ 96ms），约 496ms 时最后一个 surface 落地。两者都由同一个
-属性变更信号触发，因此**顺序是常量保证的**，不依赖调度时序。
-取 400ms 而非贴着实测值，是为了给 Qt 创建 surface 留出余量。
+大约在 182ms 时 map；depthscape 重建后自身分阶段映射
+（3 步 × 32ms ≈ 96ms）。
+
+日常主路径不需要额外处理：换壁纸时 `foregroundPath` 先被清空、当前
+`stageTimer` 会重跑一轮，新图就绪后重新 map，自然处于最上层。
 
 #### 点击穿透
 
@@ -1153,6 +1200,11 @@ mask: Region {}          // 空输入区域 = 完全点击穿透
 > 前景像素**」，再单独断言没有任何像素等于背景色。
 > 区分背景泄漏与时钟覆盖看色相：天空是 `(173,12,43)` **暗红**，
 > 时钟是 `(255,179,181)` **浅粉**/白，一亮一暗。
+>
+> **2026-09-21 补充**：反过来也会误判——把「时钟露出来」当成叠序 bug。
+> 时钟的白字如果落在前景 alpha = 0 的像素上（人物抠图的**发丝间隙**），
+> 从缝隙里透出来是**正确行为**。判定必须**逐像素比对前景图的 alpha 通道**：
+> 白字处 alpha 高 → 真 bug；alpha 为 0 → 正常。这条比任何 layer 工具都可信。
 
 > 截图必须**每次确认输出**：`focus-monitor-left` 在截图动作本身会挪焦点，
 > 本轮曾在 DP-3 上按 DP-1 坐标验证，得到「0% 匹配」的垃圾结论。
@@ -1193,7 +1245,7 @@ mask: Region {}          // 空输入区域 = 完全点击穿透
 | `-bg.png` | RGB（不透明） | 同一场景，主体区域被**模糊填充** |
 
 `DepthBackground` 画后者、`DepthWidgetHost` 画中间的 widget、
-`DepthForeground` 画前者，三层都在 `bottom` 层按 map 顺序叠。
+`DepthForeground` 画前者，三层都在 `background` 层按 map 顺序叠。
 
 #### 两个必须遵守的约定
 
@@ -1234,10 +1286,14 @@ straight alpha 下合成式是 `α·C_fg + (1-α)·C_bg`，而 `C_fg = C_src`，
   成品 PNG 是 **27 MB**，纯遮罩只有 277 KB。但这个反对理由在拆图方案下
   已经失效——现在输出的是降采样后的 1920×1080，`-fg.png` **2.5 MB**、
   `-bg.png` **1.88 MB**，且 `-bg` 用 RGB 而非 RGBA 又省掉四分之一。
-- **`place-within-backdrop`**：把 surface 塞进 backdrop 最底层，
-  被同在 backdrop 的 DMS 壁纸和 overview blur 完全盖住（实测 0.0%）。
-  且必须由 niri `layer-rule` 按 namespace 显式开启。**本架构不开它，
-  也因此不需要任何用户侧 niri 配置。**
+- **`place-within-backdrop`**：把 surface 放进 overview 的共享 backdrop。
+  必须由 niri `layer-rule` 按 namespace 显式开启——**本架构用它是必需的**
+  （否则背景会被逐 workspace card 克隆），因此 README 里有一条必做的
+  用户侧配置。
+  > 早先曾判定它"不可用"（实测 0.0% 可见），那是**误判**：当时 DMS 的
+  > `quickshell` 壁纸压在 backdrop 上把一切都盖住了。参考实现
+  > `wallpaper-parallax` 用它达到 MAE 0.00 对齐，证明机制本身可用。
+  > 详细论证与 niri 源码依据见 §14.6。
 
 ---
 
@@ -1347,6 +1403,103 @@ widget 布局因此改存 `$XDG_DATA_HOME/depthscape/widgets.json`。
 > 夹具里 `pluginService` 是完整单例，真实会话里是精简包装；
 > 夹具里三个 surface 同一时刻创建，真实会话里 Widget 层晚于前景 map。
 > 这两个 bug 都只有真正装进 DMS 才会出现。
+
+---
+
+### 14.6 overview：我们的图**就是**那块共享 backdrop
+
+**先分清两个"层"**，混淆它们是本项目最长寿的一个 bug：
+
+1. **wlr-layer-shell 的 layer** —— 合成器给的，`background < bottom < top <
+   overlay`，普通应用窗口夹在 `bottom` 与 `top` 之间。我们放 `background`，
+   所以窗口永远在壁纸之上。
+2. **niri 的 backdrop（共享背景）** —— 这是 `background` 层**内部**的一个子
+   概念：overview 里跨越所有 workspace card 及其间隙的那**一张**底图。
+
+> **光在 `background` 层是不够的。** niri 只把命中带
+> `place-within-backdrop true` 的 `layer-rule` 的 surface 放进 backdrop；
+> 没命中的 surface 被当成**普通 background surface**，在 overview 里被
+> **逐工作区卡片克隆**——也就是最早看到的「每个 workspace 各有一张壁纸」。
+> **层级本身不是杠杆，那条规则才是。**
+
+所以三个 surface 都用同一个 namespace 前缀，一条规则全收：
+
+```kdl
+layer-rule {
+    match namespace="^depthscape:"
+    place-within-backdrop true
+}
+```
+
+**背板内的堆叠是 map 顺序。** 读 niri 26.04 源码
+（`src/niri.rs` 的 `layers_in_render_order`）确认：
+
+```rust
+// LayerMap returns layers in reverse stacking order.
+layer_map.layers_on(layer).rev().filter_map(move |surface| {
+    if for_backdrop != mapped.place_within_backdrop() { return None; }
+    ...
+})
+```
+
+`LayerMap.layers` 是 `IndexSet`，`map_layer` 用 `insert()` 追加到末尾 →
+迭代序 = map 顺序；`.rev()` 之后**晚 map 的在前（画在上面）**。
+于是 backdrop 里"谁在上面"**纯粹是"谁最后 map"**，与 layer 无关——
+所有 backdrop 成员都在同一个 `background` 层。
+
+**这就带来一个必须处理的竞争：DMS 的原生壁纸也在同一个 backdrop 里。**
+用户 `config.kdl` 有 `match namespace="^quickshell$"` 规则把它收进去
+（DMS 自己也生成一条 `dms:blurwallpaper` 规则）。它在
+`pluginReadyKey` 变化时重建——也就是插件列表加载完之后，**晚于本 daemon
+第一次 map**——于是它排到我们之上，把整套合成盖掉。
+
+> **症状极具迷惑性**：三个 surface 全部健康、`niri msg layers` 里都在、
+> 日志无报错，但屏幕上看到的是 DMS 的原生壁纸（**清晰、完整、含人物**），
+> 我们的效果"消失"了。
+
+**修法**：`startupRaise` 每 3 秒重建一次 surface（unmap + re-map，这是
+layer-shell 唯一的"提升"手段），共 4 次，覆盖 3s..12s 这段 DMS settle 的窗口。
+只 raise 一次会输掉这个竞争。
+
+**验证结果**（DP-3，2560×1440）：
+
+- **桌面**：clock 数字左侧被前景人物**硬切断**，右侧从发丝间隙透出。
+  逐像素核对确认——白字像素处前景 alpha **全为 0**（人物抠图的缝隙），
+  而前景 alpha=255 的像素上屏幕显示的是人物。**遮挡关系正确。**
+- **overview**：一张连续模糊壁纸铺满全屏，**无逐卡片克隆**（见 §14.6.1）。
+
+**代价与前提**：用户必须手动加那条 `layer-rule`（插件自己加不了）。
+DMS 壁纸可以继续开着当兜底（在我们图片解码完成前遮住空窗期），
+但它与我们在 backdrop 内**争夺同一个位置**，因此 §14.6.1 的重试是必需的。
+
+#### 14.6.1 一次误判及其教训
+
+排查中曾把"clock 画在人物之上"判定为叠序 bug，并据此改动过 stage 门槛、
+namespace、`asynchronous` 三处——**全部无效**。真实原因是逐像素核对时发现：
+
+| 采样点 | 屏幕 | 前景 alpha | 背景图 |
+|---|---|---|---|
+| (1167,873) | `(244,244,248)` 白 | **0** | `(108,155,226)` |
+| (1142,900) | `(244,244,248)` 白 | **0** | `(33,164,215)` |
+| (1133,804) | `(228,244,247)` | **255** | `(109,139,167)` |
+
+clock 的白字**全部落在前景 alpha = 0 的像素上**——那是人物抠图的**发丝
+间隙**。clock 从缝隙里透出来是**正确行为**。
+
+> **判断"谁盖谁"必须逐像素比对前景图的 alpha 通道**，不能靠肉眼看着像压住了。
+> 这条比任何 layer 工具都可信；`niri msg layers` 的顺序是字母序、不携带 z 序，
+> 完全不能用于此。
+
+**顺带修掉的一个真 bug**：退出 overview 时三个 `visible` 在同一轮事件循环里
+一起翻成 `true`，三个窗口同时 map，顺序回到不确定——实测表现为**背景压在
+前景之上**（不透明区 vs 背景 MAE **1.11**、vs 前景 **58.01**）。
+修法是 `onWantedChanged` 里**先 rewind stage 再 restart**（背景已 map 时
+rewind 到 1 而非 0，避免闪 DMS 壁纸），把串行映射重跑一遍。修复后同一判据
+变成 vs 前景 **1.68**、vs 背景 **56.34**。
+
+> staged mapping 不是一次性建立的关系：**任何让多个 surface 同时变为可见的
+> 状态转换**都会重新引入不确定性。overview 是目前唯一一处，但新增这类转换时
+> 要照同一个模式处理。
 
 ---
 
