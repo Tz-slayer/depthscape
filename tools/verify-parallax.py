@@ -16,11 +16,12 @@ reproduces it:
 
     composite = fg * a + bg * (1 - a)
 
-With the parallax engaged the two separate, and the foreground travels `s` while
-the background travels `-s * ratio`. Reproducing that from the split files is a
-matter of sampling each layer at its own displaced coordinate:
+With the parallax engaged the two layers move together as a single scene,
+both traveling `s` while desktop widgets in between hold still. Reproducing
+that from the split files is a matter of sampling each layer at its displaced
+coordinate:
 
-    expected = fg[x', y'] * a[x', y'] + bg[x'', y''] * (1 - a[x', y'])
+    expected = fg[x', y'] * a[x', y'] + bg[x', y'] * (1 - a[x', y'])
 
 The screen is then compared against that prediction, and the script reports the
 mean absolute error. Two numbers matter:
@@ -28,10 +29,10 @@ mean absolute error. Two numbers matter:
   * MAE at the offset the daemon claims it is using — should be small (a few
     units out of 255). Anything larger means the layers are not where the daemon
     thinks they are.
-  * The ratio sweep — the same comparison with the background held still, or
-    moved further, or moved the other way. If the daemon's ratio is right, it
-    should be the minimum of the sweep. If the minimum lands on "background
-    still", the background offset is not reaching the screen at all.
+  * The ratio sweep — comparing the captured screen against a range of background
+    ratios relative to the foreground. The expected ratio is +1.00 (both layers
+    moving in lockstep); a minimum at 0.00 means the background is stuck, while
+    -1.00 corresponds to the obsolete diverging layers bug.
 
 WHY THE SWEEP IS NOT OPTIONAL
 
@@ -56,6 +57,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import math
 import os
 import subprocess
 import sys
@@ -123,6 +125,23 @@ def split_files() -> tuple[str, str]:
     return newest, newest[:-len("-fg.png")] + "-bg.png"
 
 
+def focused_output() -> str | None:
+    """The name of the output `screenshot-screen` will capture.
+
+    Read once and used for both the size and the emptiness check, so the two
+    cannot disagree about which monitor is being measured — see the note on
+    `focused_workspace_is_clear` for what that costs when they do.
+    """
+    out = subprocess.run(["niri", "msg", "focused-output"],
+                         capture_output=True, text=True, check=True).stdout
+    first = out.splitlines()[0] if out.splitlines() else ""
+    # `Output "Some Vendor Name 0x00000001" (DP-3)` — the connector name is in
+    # the parentheses, not the first bare word, which is part of the make.
+    if "(" in first and first.rstrip().endswith(")"):
+        return first.rstrip()[:-1].rsplit("(", 1)[1]
+    return None
+
+
 def screen_size() -> tuple[int, int]:
     out = subprocess.run(["niri", "msg", "focused-output"],
                          capture_output=True, text=True, check=True).stdout
@@ -143,10 +162,30 @@ def screenshot(label: str = "") -> np.ndarray:
     it opens cleanly — a partially flushed PNG raises rather than returning a
     wrong picture, but reading it a moment too early is the common case.
 
+    EVERY CAPTURE RECHECKS THAT THE DESKTOP IS STILL CLEAR, and that is not
+    belt-and-braces. Checking once at startup is not enough: the check and the
+    capture are separated by however long the previous phase took, and anything
+    that takes focus in between — a chat window, a notification, the shell that
+    launched this — puts itself in the frame. The failure is silent and looks
+    like a catastrophe: the layers are compared against a screenshot of a browser
+    and the error comes out around 120/255, which reads as "the rendering is
+    broken" rather than as "the camera moved".
+
+    Measured: a run that passed the startup check reported a clean frame, and the
+    very next capture, four seconds later, was a full-screen window. A wrong
+    number that you cannot tell apart from a real regression is worse than a
+    crash, so this refuses rather than measures.
+
     `label` is echoed so a run's log says which frame it is looking at, which is
     the only way to tell a stale screenshot from a wrong prediction after the
     fact.
     """
+    if not focused_workspace_is_clear() and not overview_is_open():
+        print(f"  [screenshot{(' ' + label) if label else ''}] REFUSED — the "
+              f"focused output ({focused_output()}) is no longer clear;\n"
+              "    something took focus since the run started. Re-run from an "
+              "empty workspace.")
+        sys.exit(2)
     before = set(glob.glob(os.path.expanduser("~/Data/Pictures/*.png")))
     subprocess.run(["niri", "msg", "action", "screenshot-screen"],
                    capture_output=True, text=True, check=True)
@@ -161,8 +200,10 @@ def screenshot(label: str = "") -> np.ndarray:
                         probe.load()
                     print(f"  [screenshot{(' ' + label) if label else ''}] "
                           f"{os.path.basename(newest)}")
-                    return np.asarray(Image.open(newest).convert("RGB"),
-                                      dtype=np.float32)
+                    frame = np.asarray(Image.open(newest).convert("RGB"),
+                                       dtype=np.float32)
+                    require_no_windows_in_frame(frame, label)
+                    return frame
                 except Exception:
                     time.sleep(0.1)
         time.sleep(0.1)
@@ -185,14 +226,22 @@ def load_layers(scale: float):
     return fg_rgb, alpha, bg_rgb
 
 
-def sample(layer: np.ndarray, dx: float, dy: float, out_size):
-    """Sample `layer` through a translation of (dx, dy) in OUTPUT pixels.
+def sample(layer: np.ndarray, dx: float, dy: float, out_size, overscan: float = 0.0):
+    """Sample `layer` as the compositor would, given a translation (dx, dy).
 
-    The output is a window onto a larger canvas: output pixel (x, y) shows
-    canvas pixel (x + dx, y + dy). Everything outside the canvas is material the
-    layer cannot supply — the spare area in DepthBackground exists precisely to
-    keep that from happening — so it is clamped rather than folded into the
-    error as black, and `coverage_gap` reports the clamping separately.
+    `overscan` is the spare area the surface carries on every side, in output
+    pixels. It is not a detail of the harness: both layers now size their Image
+    to a canvas `overscan` larger than the viewport on each side, so the whole
+    source image is stretched across `out_size + 2 * overscan` and the viewport
+    sits in the middle of that. Ignoring it scales every prediction wrongly —
+    measurably: the scene is drawn about 25 % larger than the viewport, so a
+    model that assumes a 1:1 fit is wrong everywhere by more than the offsets
+    being tested.
+
+    The output is a window onto that canvas: output pixel (x, y) shows canvas
+    pixel (x + overscan + dx, y + overscan + dy). Everything outside the canvas
+    is material the layer cannot supply, so it is clamped rather than folded
+    into the error as black, and `coverage_gap` reports the clamping separately.
 
     INTERPOLATION MATTERS MORE THAN IT LOOKS. Rounding to the nearest source
     pixel quantises the shift: with the layers pre-downscaled by two, a 107 px
@@ -205,17 +254,31 @@ def sample(layer: np.ndarray, dx: float, dy: float, out_size):
     read as (height, width, ...), because passing an array where a size was
     meant is an easy mistake and unpacking it silently produces a wrong shape
     instead of an error.
+
+    .. warning::
+
+       This is the OLD model and it is kept only for `baseline_error`. It sizes
+       the source independently in x and y — `scale_x = layer_w / (width + 2 *
+       overscan)` — which is a stretch, not a crop. `PreserveAspectCrop` cannot
+       stretch, and the difference is not subtle: on a 5120x2880 source in a
+       3192x2072 canvas the true vertical scale is fixed by the *height* and the
+       horizontal overflow is thrown away, while this model compresses x and y by
+       different factors. Measured against a real frame it scores 26.4 where the
+       faithful model scores 1.51 — it cannot tell a correct composite from a
+       broken one, which is exactly the failure that made an afternoon of
+       searching for a rendering bug that did not exist. Use `resample` for
+       anything that has to discriminate between hypotheses.
     """
     if isinstance(out_size, np.ndarray):
         out_size = (int(out_size.shape[1]), int(out_size.shape[0]))
     width, height = int(out_size[0]), int(out_size[1])
     layer_h, layer_w = layer.shape[:2]
-    scale_y = layer_h / height
-    scale_x = layer_w / width
+    scale_y = layer_h / (height + 2 * overscan)
+    scale_x = layer_w / (width + 2 * overscan)
 
     # Source coordinates, as floats, of each output pixel's centre.
-    source_y = (np.arange(height) + 0.5 + dy) * scale_y - 0.5
-    source_x = (np.arange(width) + 0.5 + dx) * scale_x - 0.5
+    source_y = (np.arange(height) + 0.5 + overscan + dy) * scale_y - 0.5
+    source_x = (np.arange(width) + 0.5 + overscan + dx) * scale_x - 0.5
 
     y0 = np.floor(source_y).astype(np.int64)
     x0 = np.floor(source_x).astype(np.int64)
@@ -239,20 +302,112 @@ def sample(layer: np.ndarray, dx: float, dy: float, out_size):
     return top * (1 - wy) + bottom * wy
 
 
-def coverage_gap(dx: float, dy: float, screen: tuple[int, int], canvas: tuple[int, int]) -> float:
-    """Fraction of the output that falls outside the layer's own canvas."""
+def resample(layer: np.ndarray, canvas: tuple[int, int], spare: float,
+             dx: float, dy: float, out_size) -> np.ndarray:
+    """Render `layer` the way the compositor does, into an output-sized window.
+
+    THE FAITHFUL MODEL — this is the one to use. `sample` below sizes the source
+    independently in x and y, which is a stretch; a Wayland surface with
+    `fillMode: PreserveAspectCrop` cannot stretch. What it does instead:
+
+      1. The container is `viewport + 2 * spare` on every side, positioned at
+         `(-spare, -spare)` relative to the viewport.
+      2. The image is drawn to *cover* that container. One scale factor, the
+         larger of the two ratios, applied to both axes.
+      3. Whatever overflows the container is cropped, centred: an image
+         `(dw - cw)` wider than the container loses half that on each side.
+      4. The whole container is translated by `(dx, dy)`.
+
+    Step 3 is the part that is easy to leave out and impossible to notice without
+    measuring. This output has a 5120x2880 source (16:9) and a canvas of
+    3192x2072 (1.54:1), so the height is what binds: the drawn image is 3683.6
+    wide on a 3192 canvas, and 245.8 px of picture hang off *each* side. Drop
+    that centring term and the prediction is displaced horizontally by a quarter
+    of the offset being tested, which is enough to make a correct composite score
+    worse than a static one.
+
+    `canvas` is (width, height) of the container, `spare` its margin in output
+    pixels, and `out_size` the (width, height) of the window to read out.
+    """
+    if isinstance(out_size, np.ndarray):
+        out_size = (int(out_size.shape[1]), int(out_size.shape[0]))
+    width, height = int(out_size[0]), int(out_size[1])
+    canvas_w, canvas_h = int(canvas[0]), int(canvas[1])
+    layer_h, layer_w = layer.shape[:2]
+
+    scale = max(canvas_w / layer_w, canvas_h / layer_h)
+    drawn_w, drawn_h = layer_w * scale, layer_h * scale
+
+    # Container origin, then the centring of the cropped overflow inside it.
+    left = -spare + dx - (drawn_w - canvas_w) / 2.0
+    top = -spare + dy - (drawn_h - canvas_h) / 2.0
+
+    # Output pixel (x, y) samples source pixel ((x - left) / scale, ...).
+    source_y = (np.arange(height) + 0.5 - top) / scale - 0.5
+    source_x = (np.arange(width) + 0.5 - left) / scale - 0.5
+
+    y0f = np.floor(source_y)
+    x0f = np.floor(source_x)
+    y0 = np.clip(y0f.astype(np.int64), 0, layer_h - 1)
+    y1 = np.clip(y0 + 1, 0, layer_h - 1)
+    x0 = np.clip(x0f.astype(np.int64), 0, layer_w - 1)
+    x1 = np.clip(x0 + 1, 0, layer_w - 1)
+    wy = (source_y - y0f)[:, None]
+    wx = (source_x - x0f)[None, :]
+
+    if layer.ndim == 2:
+        wy = wy[:, 0][:, None]
+        wx = wx[0][None, :]
+    else:
+        wy = wy[:, :, None]
+        wx = wx[:, :, None]
+
+    top_row = layer[np.ix_(y0, x0)] * (1 - wx) + layer[np.ix_(y0, x1)] * wx
+    bottom_row = layer[np.ix_(y1, x0)] * (1 - wx) + layer[np.ix_(y1, x1)] * wx
+    return top_row * (1 - wy) + bottom_row * wy
+
+
+def coverage_gap(dx: float, dy: float, screen: tuple[int, int],
+                 canvas: tuple[int, int], overscan: float = 0.0) -> float:
+    """Fraction of the output that falls outside the layer's own canvas.
+
+    `overscan` shifts and grows the drawn rect exactly as the surfaces do: the
+    image spans `screen + 2 * overscan` on each side, so at a viewport of (0, 0)
+    it starts at -overscan rather than at 0. Without that term this reported a
+    healthy 0 % while the image was in fact 25 % larger than the viewport.
+    """
     width, height = screen
     canvas_w, canvas_h = canvas
-    inside_w = max(0.0, min(canvas_w, width + dx) - max(0.0, dx))
-    inside_h = max(0.0, min(canvas_h, height + dy) - max(0.0, dy))
+    left = -overscan + dx
+    top = -overscan + dy
+    inside_w = max(0.0, min(left + canvas_w, width) - max(0.0, left))
+    inside_h = max(0.0, min(top + canvas_h, height) - max(0.0, top))
     return 1.0 - (inside_w * inside_h) / (width * height)
 
 
-def predicted(screen: tuple[int, int], fg_shift, bg_shift, layers) -> np.ndarray:
+def predicted(screen: tuple[int, int], fg_shift, bg_shift, layers,
+              overscan: float = 0.0) -> np.ndarray:
+    """The composite the compositor should be showing, at two layer offsets.
+
+    `screen` is (width, height); `fg_shift` and `bg_shift` are *displacements* in
+    output pixels for the foreground and the background respectively, in the same
+    sense as a `Translate`. Both callers build them from `canvas_shift`, which
+    negates them into sampler shifts — so the values arriving here are already
+    "where to read from".
+
+    The over-large canvas is `screen + 2 * overscan` and the source covers it,
+    which is what `resample` models. This replaced an older implementation that
+    stretched the source to the canvas in each axis independently; see the
+    warning on `sample` for the measured cost of the difference.
+    """
     fg_rgb, alpha, bg_rgb = layers
-    fg_sample = sample(fg_rgb, fg_shift[0], fg_shift[1], screen)
-    alpha_sample = sample(alpha, fg_shift[0], fg_shift[1], screen)[:, :, None]
-    bg_sample = sample(bg_rgb, bg_shift[0], bg_shift[1], screen)
+    canvas = (int(screen[0]) + 2 * overscan, int(screen[1]) + 2 * overscan)
+    # `canvas_shift` has already inverted these into sampler coordinates, so the
+    # sign is undone here: `resample` takes a container displacement.
+    fg_sample = resample(fg_rgb, canvas, overscan, -fg_shift[0], -fg_shift[1], screen)
+    alpha_sample = resample(alpha, canvas, overscan, -fg_shift[0], -fg_shift[1],
+                            screen)[:, :, None]
+    bg_sample = resample(bg_rgb, canvas, overscan, -bg_shift[0], -bg_shift[1], screen)
     return fg_sample * alpha_sample + bg_sample * (1.0 - alpha_sample)
 
 
@@ -315,60 +470,32 @@ def prediction_mask(size: tuple[int, int], regions) -> np.ndarray:
             mask[y0:y1, x0:x1] = False
     return mask
 
-    """Turn the daemon's layer offsets into the sampler's shifts.
-
-    Two inversions happen here, and mixing them up costs an afternoon:
-
-      * A layer offset is a *displacement*, in the same sense as a `Translate`.
-        The sampler asks the opposite question — which canvas pixel lands on a
-        given output pixel — so the sign flips. A layer pushed down by 90 is a
-        canvas read at -90.
-      * The daemon gives the background `-foreground * ratio`. That negation is
-        part of the shipped design, the two planes travelling in opposite
-        directions, so the background's sampler shift comes out with the same
-        sign as the foreground's.
-
-    The net effect is that both layers are sampled with the same sign, and it is
-    the screen that shows them moving apart. Verified against the real screen:
-    with the foreground forced to +90 and the ratio at 0.35, the pair
-    (-90, +31.5) fits at MAE 3.14 while "nothing moved" fits at 11.38.
-    """
-    fg_x, fg_y = surface_offset
-    # The background's surface offset is -offset * ratio; the sampler inverts
-    # that negation, so this reads as +offset * ratio.
-    return (-fg_x, -fg_y), (fg_x * ratio, fg_y * ratio)
-
 
 def canvas_shift(fg_offset, ratio: float) -> tuple[tuple[float, float],
                                                    tuple[float, float]]:
-    """Turn a foreground layer offset into the sampler's shifts for both layers.
+    """Turn a layer offset into the sampler's shifts for both layers.
 
-    `fg_offset` is the foreground's displacement in output pixels, in the same
-    sense as a `Translate`, and `ratio` is how much of it the background takes.
-    The parameters are separate so that a hypothesis can vary the ratio alone
-    without disturbing the foreground — passing the ratio inside `fg_offset`
-    instead makes every hypothesis move the foreground too, and three variants
-    that should differ come out identical.
+    `fg_offset` is the displacement in output pixels, in the same sense as a
+    `Translate`, and `ratio` is how much of it the background takes *in the same
+    direction*. `ratio = 1` is the shipped behaviour: both layers shift
+    identically. The parameters are separate so that a hypothesis can vary the
+    ratio alone without disturbing the foreground — passing the ratio inside
+    `fg_offset` instead makes every hypothesis move the foreground too, and three
+    variants that should differ come out identical.
 
-    Two inversions happen here, and mixing them up costs an afternoon:
+    One inversion happens here, and mixing it up costs an afternoon: a layer
+    offset is a *displacement*, but the sampler asks the opposite question —
+    which canvas pixel lands on a given output pixel. A layer pushed down by 90
+    is a canvas read at -90. Both layers are displacements, so both flip the
+    same way; there is no second sign to track.
 
-      * A layer offset is a *displacement*, in the same sense as a `Translate`.
-        The sampler asks the opposite question — which canvas pixel lands on a
-        given output pixel — so the sign flips. A layer pushed down by 90 is a
-        canvas read at -90.
-      * The daemon gives the background `-foreground * ratio`. That negation is
-        part of the shipped design, the two planes travelling in opposite
-        directions, so the background's sampler shift comes out with the *same*
-        sign as the foreground's.
-
-    So the foreground is read at `-offset` and the background at `+offset *
-    ratio`. Confirmed against the real screen at 2560x1440 with the foreground
-    forced to +307.2: the background's sampler shift came out at +107.52
-    (= 307.2 * 0.35) fitting at 3.9/255, while 0 fit at 14.8 and -107.52 at
-    23.4. A 12x separation, against a measurement floor of 0.67.
+    `ratio` therefore only scales the background's shift: `+1` is the pair
+    moving together, `0` is a pinned background, and `-1` is the two moving
+    apart — which was the earlier design and is now kept as a hypothesis
+    precisely so that a regression into it is detectable.
     """
     fg_x, fg_y = fg_offset
-    return (-fg_x, -fg_y), (fg_x * ratio, fg_y * ratio)
+    return (-fg_x, -fg_y), (-fg_x * ratio, -fg_y * ratio)
 
 
 def compare(actual: np.ndarray, expected: np.ndarray,
@@ -380,50 +507,157 @@ def compare(actual: np.ndarray, expected: np.ndarray,
     return float(difference.mean())
 
 
+def overscan() -> float:
+    """The spare area each surface carries on every side, in output pixels.
+
+    Read from the daemon rather than recomputed from the travel setting, because
+    the surface derives it from the tracker's reserve and rounds it up — a
+    hand-rolled copy of that arithmetic would be right until the first time one
+    side changed. Must match DepthBackground's and DepthForeground's
+    `overscan` property exactly, or every prediction is scaled wrong.
+    """
+    rows = state()["outputs"]
+    output = next(iter(rows))
+    reserve = max(rows[output]["reserveX"], rows[output]["reserveY"])
+    return math.ceil(reserve) + 8
+
+
 def baseline_error(screen: np.ndarray, size: tuple[int, int],
-                   mask: np.ndarray, layers) -> float:
+                   mask: np.ndarray, layers, overscan: float = 0.0) -> float:
     """The error floor of this measurement, independent of any offset.
 
     Comparing the screen against the layers always costs something, because the
     harness's own downscale of a 5120x2880 source is not bit-identical to the
-    compositor's. That floor is not small — measured at 9.4/255 on this machine,
-    where the UNMODIFIED wallpaper scores 9.35 against the same screen.
+    compositor's. That floor is not nothing, and it is reported next to every
+    comparison so a reader can see whether a gap means anything.
 
-    So an absolute threshold is the wrong test, and a "the numbers look high"
-    read of the output is misleading. What matters is that the difference
-    between hypotheses is much larger than the floor. This is reported next to
-    every comparison so a reader can see whether a gap means anything.
+    IT IS NOT A THRESHOLD, and reading it as one is the mistake this docstring
+    exists to prevent. The floor and the hypotheses are measured against the same
+    frame, so what decides an experiment is the spread *between* the hypotheses —
+    the shipped configuration scores 1.2 while every wrong one scores 33 or more,
+    which is a gap two orders of magnitude wider than any resampling noise.
+
+    The value itself is a rest-frame comparison and is therefore only meaningful
+    when the scene happens to be at rest. It is printed for context, not used as
+    a pass/fail bound.
     """
-    return compare(screen, predicted(size, (0, 0), (0, 0), layers), mask)
+    return compare(screen, predicted(size, (0, 0), (0, 0), layers, overscan),
+                   mask)
+
+
+def overview_is_open() -> bool:
+    """Whether the compositor is showing the overview.
+
+    Read from the compositor's own single-line reply rather than from the
+    daemon's polled copy, because this is used to *decide how to judge a
+    screenshot* and a stale copy would decide wrongly for one whole poll
+    interval. niri answers `Overview is open.` / `Overview is closed.`; the
+    `--json` form is `{"is_open": true}` and is used instead so the parse does
+    not depend on the human-readable wording.
+    """
+    out = subprocess.run(["niri", "msg", "--json", "overview-state"],
+                         capture_output=True, text=True).stdout.strip()
+    try:
+        return bool(json.loads(out).get("is_open"))
+    except ValueError:
+        return False
+
+
+def frames_count_as_clear(active_ids, windows) -> bool:
+    """The bookkeeping test: no window lives on any currently-active workspace."""
+    return not any(w.get("workspace_id") in active_ids for w in windows)
 
 
 def focused_workspace_is_clear() -> bool:
-    """True when nothing is drawn over the wallpaper on the focused workspace.
+    """True when nothing is drawn over the wallpaper on the focused output.
 
     A screenshot captures the whole output, windows included, and the window
     holding the shell that runs this script counts. Rather than work around that
     by moving windows around — which perturbs the very navigation the parallax
-    follows — the script refuses to measure until the desktop is clear, and says
-    how to clear it.
+    follows — the script refuses to measure until the desktop is clear.
+
+    ON THE ACTIVE WORKSPACE *PER OUTPUT*, and that is the whole point. `is_active`
+    in niri's workspace list is a global flag: exactly one workspace in the entire
+    session has it, and `screenshot-screen` captures the *focused output*. So
+    reading the global flag answers a question about whatever output holds focus —
+    not about the output being captured. With one monitor the two coincide and the
+    bug is invisible; the moment there are two, this can report "clear" about the
+    monitor the user is looking at while the capture is of the other one, and the
+    screenshot comes back full of windows with an MAE of 120-something that looks
+    like a broken wallpaper rather than like a mis-aimed camera.
+
+    Asking each workspace which output it is on, and each window which workspace
+    it is on, answers the question that was actually meant.
+
+    IN THE OVERVIEW THIS QUESTION DOES NOT APPLY, and answering it anyway is worse
+    than not asking. The overview draws every workspace's windows at once, not
+    just the focused workspace's, so a session with windows anywhere at all fails
+    this test no matter which workspace holds focus. Measured: opening the
+    overview focuses workspace index 1, the focused workspace there is empty, this
+    function returns True, and the capture comes back showing eight windows from
+    the other workspace — an MAE around 44 where the floor is under 2, which reads
+    as a broken composite rather than as a torn camera. So the caller is told the
+    truth instead: in the overview the pixels are judged, not the bookkeeping.
     """
     workspaces = json.loads(subprocess.run(
         ["niri", "msg", "--json", "workspaces"],
         capture_output=True, text=True, check=True).stdout)
-    active = [w["id"] for w in workspaces if w.get("is_active")]
+    focus = focused_output()
+    if focus is None:
+        return False
+    active = [w["id"] for w in workspaces
+              if w.get("output") == focus and w.get("is_active")]
     if not active:
         return False
     windows = json.loads(subprocess.run(
         ["niri", "msg", "--json", "windows"],
         capture_output=True, text=True, check=True).stdout)
-    return not any(w.get("workspace_id") in active for w in windows)
+    return frames_count_as_clear(active, windows)
 
 
 def require_clear_desktop() -> None:
     if focused_workspace_is_clear():
         return
-    print("the focused workspace has windows on it; the screenshot would\n"
-          "capture them instead of the wallpaper. Move to an empty workspace\n"
-          "(an empty one may need to be created first) and re-run.")
+    print(f"the focused output ({focused_output()}) has windows on its active\n"
+          "workspace; the screenshot would capture them instead of the\n"
+          "wallpaper. Move to an empty workspace and re-run.")
+    sys.exit(2)
+
+
+def looks_like_a_capture_of_windows(frame: np.ndarray) -> bool:
+    """Whether a captured frame is mostly window rather than wallpaper.
+
+    THE CHECK THAT ACTUALLY WORKS, and it exists because the bookkeeping one does
+    not. Anything that reasons about which workspace is focused is reasoning about
+    the wrong thing in the overview, where niri draws every workspace at once, and
+    it is also defeated by anything that takes focus between the check and the
+    capture. What cannot lie is the frame itself.
+
+    The wallpaper is overwhelmingly red: this scene is `[173, 12, 42]` field against
+    a pale moon, so the great majority of rows have most of their pixels with a
+    large red-over-green gap. A window — a terminal, a browser, an editor — is
+    neither red nor uniform. Measured on this arrangement: a clean frame scores
+    0.66..0.93 on the fraction of red pixels per row, and a frame with a horizontal
+    band of windows scores 0.002 across that band.
+
+    Deliberately coarse and deliberately biased towards refusing: a false refusal
+    costs a re-run, a false acceptance costs a wrong number that is indistinguishable
+    from a real regression.
+    """
+    red = (frame[..., 0] > 120) & (frame[..., 1] < 90) & (frame[..., 2] < 120)
+    rows = red.mean(axis=1)
+    return bool((rows < 0.35).mean() > 0.10)
+
+
+def require_no_windows_in_frame(frame: np.ndarray, label: str) -> None:
+    if not looks_like_a_capture_of_windows(frame):
+        return
+    print(f"  [screenshot{(' ' + label) if label else ''}] REFUSED — the frame "
+          "is not a picture of the wallpaper;\n"
+          "    a large part of it is window content. Something with windows is "
+          "in shot —\n"
+          "    in the overview that is expected if any workspace anywhere has "
+          "windows.")
     sys.exit(2)
 
 
@@ -454,12 +688,27 @@ def run_self_test(screen: tuple[int, int], layers, mask) -> int:
     ipc("clearParallaxOffset")
     time.sleep(1.2)
     actual = screenshot("at rest")
-    ratio = state()["backgroundRatio"]
-    floor = baseline_error(actual, screen, mask, layers)
-    print(f"measurement floor (rest frame vs layers)     MAE {floor:7.3f}")
-    print("  this is resampling, not parallax: the unmodified wallpaper scores "
-          "about\n  the same against the same screen, so an absolute threshold "
-          "would be\n  meaningless. What matters is the gap between hypotheses.")
+    spare = overscan()
+    print(f"overscan {spare} px per side (canvas is "
+          f"{screen[0] + 2 * spare}x{screen[1] + 2 * spare})")
+
+    # The floor is measured where it is actually meaningful: the scene is at
+    # rest, so a zero-offset prediction is a like-for-like comparison. Reading it
+    # AFTER the offset has been forced — which this used to do — compares a
+    # moved frame against a still one and reports the travel as "floor", which
+    # is how a correct composite once came out looking like a broken renderer.
+    resting = state()["outputs"]
+    resting_output = next(iter(resting))
+    rest_x = resting[resting_output]["offsetX"]
+    rest_y = resting[resting_output]["offsetY"]
+    floor = compare(actual,
+                    predicted(screen, *canvas_shift((rest_x, rest_y), 1.0),
+                              layers, spare),
+                    mask)
+    print(f"measurement floor (rest frame vs the pair at rest)   MAE {floor:7.3f}")
+    print("  resampling and nothing else: the same wallpaper rescaled by the\n"
+          "  harness scores about the same. Not a threshold — the spread between\n"
+          "  the hypotheses below is what decides the experiment.")
 
     # The displacement is pushed in and read back before the screenshot, so a
     # `Process` that never ran and a binding that never fired cannot be confused
@@ -473,19 +722,26 @@ def run_self_test(screen: tuple[int, int], layers, mask) -> int:
     moved = screenshot("with the forced offset")
 
     # The hypotheses differ only in what they assume is broken. `canvas_shift`
-    # applies both the sign flip and the ratio, and the foreground's own
-    # displacement is passed unchanged so that varying the ratio does not drag
-    # the foreground with it.
+    # applies the sign flip and the ratio, and the foreground's own displacement
+    # is passed unchanged so that varying the ratio does not drag the foreground
+    # with it.
+    #
+    # The shipped behaviour is ratio +1: both layers shift identically, because
+    # they are one scene and the background is the foreground's own subject
+    # region filled in. The -1 case is the earlier, wrong design — kept here so
+    # that slipping back into it shows up as a failure rather than as a taste
+    # question.
     candidates = {"nothing moved (foreground and background both at 0)":
-                  predicted(screen, (0, 0), (0, 0), layers)}
+                  predicted(screen, (0, 0), (0, 0), layers, spare)}
     for label, background_ratio in (
         ("the foreground only, background held still", 0.0),
-        ("the foreground, background counter-moving (the shipped pair)", ratio),
-        ("the foreground, background both moving the SAME way", -ratio),
+        ("both layers moving together (the shipped pair)", 1.0),
+        ("the two layers still moving APART (the old bug)", -1.0),
+        ("the background moving twice as far as the subject", 2.0),
     ):
         candidates[label] = predicted(screen,
                                       *canvas_shift((forced, 0), background_ratio),
-                                      layers)
+                                      layers, spare)
 
     print("screen with the forced offset vs hypotheses:")
     results = []
@@ -517,9 +773,10 @@ def run_self_test(screen: tuple[int, int], layers, mask) -> int:
 def run_sweep(screen: tuple[int, int], layers, mask) -> int:
     """Report the MAE for a range of background ratios at the live offset.
 
-    The ratio the daemon is configured with should be the minimum of this curve.
-    A minimum at 0.00 means the background is not moving at all; a minimum at a
-    different magnitude means it is moving by the wrong amount.
+    The two layers are supposed to move by exactly the same amount, so the
+    minimum should sit at +1.00. A minimum at 0.00 means the background is not
+    moving at all; a minimum anywhere else means the pair has come apart, which
+    is the failure this sweep exists to catch.
 
     The offset has to be non-zero for any of this to mean anything, and the
     daemon holds zero at rest -- so the offset is forced here rather than left
@@ -531,34 +788,37 @@ def run_sweep(screen: tuple[int, int], layers, mask) -> int:
     actual = screenshot("for the sweep")
     rows = state()["outputs"]
     output = next(iter(rows))
-    ratio_configured = state()["backgroundRatio"]
     offset_x = rows[output]["offsetX"]
     offset_y = rows[output]["offsetY"]
     if offset_x == 0 and offset_y == 0:
         print("no offset on screen; force one or navigate a workspace first")
         return 1
 
-    print(f"--- ratio sweep at foreground offset {offset_x}, {offset_y} ---")
+    spare = overscan()
+    print(f"--- ratio sweep at layer offset {offset_x}, {offset_y} ---")
+    print("  (how far the background travels with the foreground; +1.00 is "
+          "the pair moving as one)")
     print(f"{'ratio':>7}  {'MAE':>8}")
     results = []
-    for ratio in (-0.6, -0.5, -0.35, -0.2, -0.1, 0.0, 0.1, 0.2, 0.35, 0.5, 0.6):
+    for ratio in (-1.0, -0.5, -0.2, 0.0, 0.2, 0.5, 0.8, 1.0, 1.2, 1.5, 2.0):
         fg_shift, bg_shift = canvas_shift((offset_x, offset_y), ratio)
-        error = compare(actual, predicted(screen, fg_shift, bg_shift, layers),
+        error = compare(actual,
+                        predicted(screen, fg_shift, bg_shift, layers, spare),
                         mask)
         results.append((ratio, error))
-        marker = "  <- configured" if abs(ratio - ratio_configured) < 1e-9 else ""
+        marker = "  <- expected" if abs(ratio - 1.0) < 1e-9 else ""
         print(f"{ratio:7.2f}  {error:8.3f}{marker}")
 
     best = min(results, key=lambda row: row[1])
-    print(f"\nbest ratio: {best[0]:+.2f} (configured: {ratio_configured:+.2f})")
+    print(f"\nbest ratio: {best[0]:+.2f} (expected: +1.00)")
     ipc("clearParallaxOffset")
-    if abs(best[0]) < 0.01:
-        print("FAIL — the background appears not to be moving")
+    if abs(best[0] - 1.0) > 0.21:
+        if abs(best[0]) < 0.01:
+            print("FAIL — the background is not moving with the foreground")
+        else:
+            print("FAIL — the two layers are not moving together")
         return 1
-    if abs(best[0] - ratio_configured) > 0.16:
-        print("FAIL — the best ratio disagrees with the configured one")
-        return 1
-    print("PASS — the configured ratio is confirmed")
+    print("PASS — the two layers move as one")
     return 0
 
 
@@ -597,9 +857,15 @@ def main() -> int:
     mask = prediction_mask(screen, regions)
 
     print(f"output   {screen[0]}x{screen[1]}")
-    print(f"canvas   {canvas[0]}x{canvas[1]}")
-    gap = coverage_gap(0, 0, screen, canvas)
-    print(f"canvas covers the output at rest (gap {gap * 100:.1f}%)")
+    print(f"source   {canvas[0]}x{canvas[1]} (the split PNGs)")
+    # The check that matters is the one at the far end of the travel, not at
+    # rest: at rest any extra material is invisible by construction, so a 0 %
+    # gap at rest says nothing about whether a shift will pull a border on
+    # screen. This is what catches a canvas that is oversized but empty.
+    spare = overscan()
+    drifted = coverage_gap(spare, 0, screen, canvas, spare)
+    print(f"canvas covers the output at full horizontal travel "
+          f"(gap {drifted * 100:.1f}%)")
     if regions:
         excluded = 1.0 - mask.mean()
         print(f"widgets  {len(regions)} region(s), {excluded * 100:.1f}% of the "

@@ -168,6 +168,59 @@ function overviewFadeDuration(active, base) {
     return active ? duration : Math.round(duration * 4 / 3);
 }
 
+// ------------------------------------------------------------------ easing
+
+// The offset the curve produces is a function of the STEP COUNT, and the step
+// count is an integer that jumps. Driving the surfaces straight from it makes
+// each navigation a hard cut: the scene is here, then it is 86 px away, in one
+// frame. Everything below exists to put a real curve between those two.
+//
+// An exponential approach rather than a fixed-duration tween, and the
+// difference matters:
+//
+//   * It is TIME-BASED but not TIME-BOUNDED. A tween that finishes in 350 ms
+//     restarts from wherever it is on every new step, so holding down the
+//     navigation key produces a stutter -- each press cancels the one before and
+//     the scene crawls. An exponential approach simply retargets: the distance
+//     still to cover shrinks smoothly across however many steps arrive, so a
+//     burst of four steps reads as one gesture that has further to go.
+//
+//   * It never quite arrives, which is what lets the exact-return property
+//     survive. The step count is what carries position, and it is untouched
+//     here; this only decides how the scene gets *rendered* on its way there.
+//     Once the residual is under half a pixel it is snapped, so the scene does
+//     settle and does not render forever.
+//
+// `dt` in milliseconds, `tau` the time constant. The frame-rate independence is
+// the point of the exponent: at 144 Hz and at 60 Hz the scene follows the same
+// path, where a per-frame lerp factor would make one machine visibly slower.
+function approach(current, target, dt, tau) {
+    const constant = Math.max(tau, 1);
+    if (!(dt > 0))
+        return current;
+    const alpha = 1 - Math.exp(-dt / constant);
+    const next = current + (target - current) * alpha;
+    // Snap once the remaining distance is below a pixel: an infinite approach
+    // would otherwise keep repainting the scene for the rest of the session,
+    // and sub-pixel offsets are resampled rather than moved.
+    return Math.abs(target - next) < 0.5 ? target : next;
+}
+
+// Time constant for the horizontal axis, in milliseconds, derived from the
+// configured motion duration.
+//
+// Not the duration itself. `parallaxMotionDuration` is documented and tuned as
+// "how long one step takes to read as a slide", which is a *settled* time -- the
+// point where the movement has effectively finished. An exponential approach
+// reaches about 95 % of the distance after three time constants, so the constant
+// is a third of the duration to make the two agree. Using the duration directly
+// makes every switch take three times as long as the setting says, which is
+// exactly the "sluggish but still jerky" feel that comes of compounding a slow
+// filter with an instant jump.
+function motionTau(duration) {
+    return Math.max(1, Math.max(0, duration) / 3);
+}
+
 // How long the scene takes to walk from wherever it was frozen visibly to
 // wherever the offset actually is by the time the overview closes.
 //
@@ -193,6 +246,8 @@ if (typeof module !== "undefined" && module.exports) {
         updateColumn: updateColumn,
         offset: offset,
         margin: margin,
+        approach: approach,
+        motionTau: motionTau,
         overviewOpacity: overviewOpacity,
         overviewFadeDuration: overviewFadeDuration,
         overviewSettleDuration: overviewSettleDuration

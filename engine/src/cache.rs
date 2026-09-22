@@ -25,14 +25,19 @@ pub fn hash_file(path: &Path) -> Result<String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
+pub fn depth_key_with_fingerprint(wallpaper_hash: &str, fingerprint: &str) -> String {
+    format!(
+        "{wallpaper_hash}-{fingerprint}-d{DEPTH_PIPELINE_VERSION}-i{INPUT_SIZE}"
+    )
+}
+
 /// Cache key for the expensive model output.
 ///
 /// Depends on wallpaper contents, model fingerprint, pipeline version and the
 /// inference resolution — everything that would change the depth tensor.
+#[allow(dead_code)]
 pub fn depth_key(wallpaper_hash: &str) -> String {
-    format!(
-        "{wallpaper_hash}-{MODEL_FINGERPRINT}-d{DEPTH_PIPELINE_VERSION}-i{INPUT_SIZE}"
-    )
+    depth_key_with_fingerprint(wallpaper_hash, MODEL_FINGERPRINT)
 }
 
 /// Cache key for the split pair, derived from a depth key plus the parameters.
@@ -209,8 +214,19 @@ pub struct CacheEntry {
 }
 
 impl CacheEntry {
+    #[allow(dead_code)]
     pub fn resolve(paths: &Paths, wallpaper_hash: &str, threshold: f32, feather: f32) -> Self {
-        let depth = depth_key(wallpaper_hash);
+        Self::resolve_with_fingerprint(paths, wallpaper_hash, MODEL_FINGERPRINT, threshold, feather)
+    }
+
+    pub fn resolve_with_fingerprint(
+        paths: &Paths,
+        wallpaper_hash: &str,
+        fingerprint: &str,
+        threshold: f32,
+        feather: f32,
+    ) -> Self {
+        let depth = depth_key_with_fingerprint(wallpaper_hash, fingerprint);
         let split = split_key(&depth, threshold, feather);
         let directory = paths.split_cache();
         Self {

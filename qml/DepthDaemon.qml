@@ -24,6 +24,7 @@ PluginComponent {
     readonly property bool widgetsEnabled: pluginData.widgetsEnabled ?? true
     readonly property int thresholdPercent: pluginData.threshold ?? 30
     readonly property int featherPercent: pluginData.feather ?? 8
+    readonly property string modelType: pluginData.modelType ?? "small"
 
     // ------------------------------------------------------------- parallax
 
@@ -31,20 +32,13 @@ PluginComponent {
     /// The FIRST step as a fraction of the axis. The curve derives its
     /// deceleration from how this compares to `parallaxTravel`.
     readonly property real parallaxStepVertical: (pluginData.parallaxStepVertical ?? 60) / 1000
-    readonly property real parallaxStepHorizontal: (pluginData.parallaxStepHorizontal ?? 80) / 1000
+    readonly property real parallaxStepHorizontal: (pluginData.parallaxStepHorizontal ?? 35) / 1000
     /// The reserve both axes approach but never reach, as a fraction of the
     /// axis. Also the size of the slack the surfaces carry.
     readonly property real parallaxTravel: (pluginData.parallaxTravel ?? 12) / 100
-    /// How far the background travels relative to the foreground. Below 1 the
-    /// background lags, which is what produces the depth cue: the foreground is
-    /// nearer the viewer, so it sweeps further for the same navigation. 0 pins
-    /// the background, which was measured to read as a rendering fault rather
-    /// than as depth — see DepthForeground.qml.
-    readonly property real parallaxBackgroundRatio: (pluginData.parallaxBackgroundRatio ?? 35) / 100
     readonly property bool parallaxInverted: pluginData.parallaxInverted ?? false
-    /// How long one navigation step takes to ease, in ms. OutCubic; short enough
-    /// to feel attached to the keypress, long enough to read as a slide.
-    readonly property int parallaxMotionDuration: pluginData.parallaxDuration ?? 350
+    /// How long one navigation step takes to transition, in ms.
+    readonly property int parallaxMotionDuration: pluginData.parallaxDuration ?? 240
 
     // ------------------------------------------------------------- overview
     //
@@ -69,10 +63,10 @@ PluginComponent {
     // blur" rather than a binding error on every frame.
     readonly property bool blurInOverview: SettingsData.blurWallpaperOnOverview ?? true
 
-    // Changing either parameter invalidates the image pair but not the depth
-    // map, so this key is what decides whether a finished job is still worth
+    // Changing either parameter or the model invalidates the image pair,
+    // so this key is what decides whether a finished job is still worth
     // applying.
-    readonly property string parametersKey: threshold.toFixed(4) + ":" + feather.toFixed(4)
+    readonly property string parametersKey: modelType + ":" + threshold.toFixed(4) + ":" + feather.toFixed(4)
 
     // ------------------------------------------------------------------ engine
 
@@ -82,6 +76,9 @@ PluginComponent {
     property string engineProblem: ""
     property bool modelReady: false
     property bool modelBusy: false
+    property string installingModel: ""
+    property var availableModels: []
+    property var currentModelInfo: null
 
     // ------------------------------------------------------------------ layout
 
@@ -187,16 +184,24 @@ PluginComponent {
             });
         }
         rows.sort((left, right) => left.name < right.name ? -1 : 1);
-        pluginService.savePluginState(pluginId, "status", {
-            "enginePath": enginePath,
-            "engineProblem": engineProblem,
-            "modelReady": modelReady,
-            "modelBusy": modelBusy,
-            "enabled": effectEnabled,
-            "threshold": thresholdPercent,
-            "feather": featherPercent,
-            "outputs": rows
-        });
+        try {
+            pluginService.savePluginState(pluginId, "status", {
+                "enginePath": enginePath,
+                "engineProblem": engineProblem,
+                "modelReady": modelReady,
+                "modelBusy": modelBusy,
+                "installingModel": installingModel,
+                "modelType": modelType,
+                "availableModels": availableModels,
+                "currentModel": currentModelInfo,
+                "enabled": effectEnabled,
+                "threshold": thresholdPercent,
+                "feather": featherPercent,
+                "outputs": rows
+            });
+        } catch (e) {
+            // Ignore internal state-writer warning
+        }
     }
 
     // ------------------------------------------------------------------- queue
@@ -249,7 +254,10 @@ PluginComponent {
         }
 
         active = job;
-        patchRow(job.screenName, { "state": "processing", "message": "" });
+        const currentRow = outputs[job.screenName];
+        if (!currentRow || currentRow.state !== "ready") {
+            patchRow(job.screenName, { "state": "processing", "message": "" });
+        }
         publish();
 
         lastStdout = "";
@@ -259,7 +267,8 @@ PluginComponent {
             "analyze",
             "--wallpaper", job.wallpaper,
             "--threshold", "" + threshold,
-            "--feather", "" + feather
+            "--feather", "" + feather,
+            "--model", root.modelType
         ];
         analyzeProcess.running = true;
     }
@@ -319,15 +328,79 @@ PluginComponent {
                 "elapsedMs": parsed.elapsedMs || 0,
                 "cacheHit": parsed.splitCacheHit === true
             });
+            root.persistLastOutput(job.screenName, job.wallpaper, job.parametersKey, parsed.foregroundPath, parsed.backgroundPath);
         }
         pump();
     }
 
     // ------------------------------------------------------------------ syncing
 
+    function loadInitialOutputs() {
+        let map = pluginData.lastOutputs || null;
+        if (typeof map === "string") {
+            try {
+                map = JSON.parse(map);
+            } catch (e) {
+                map = null;
+            }
+        }
+        if (!map || typeof map !== "object")
+            return;
+
+        const next = {};
+        const screens = Quickshell.screens;
+        for (let i = 0; i < screens.length; i++) {
+            const name = screens[i].name;
+            const currentWp = wallpaperFor(name);
+            const cached = map[name];
+            if (cached && currentWp && cached.wallpaper === currentWp && cached.parametersKey === parametersKey && cached.foregroundPath && cached.backgroundPath) {
+                next[name] = {
+                    "wallpaper": currentWp,
+                    "state": "ready",
+                    "foregroundPath": cached.foregroundPath,
+                    "backgroundPath": cached.backgroundPath,
+                    "message": "",
+                    "elapsedMs": 0,
+                    "cacheHit": true
+                };
+            }
+        }
+        if (Object.keys(next).length > 0) {
+            outputs = next;
+        }
+    }
+
+    function persistLastOutput(screenName, wallpaper, paramsKey, fgPath, bgPath) {
+        if (!pluginService || !pluginService.savePluginData)
+            return;
+        let map = {};
+        const raw = pluginData.lastOutputs;
+        if (typeof raw === "object" && raw !== null) {
+            for (const k in raw)
+                map[k] = raw[k];
+        } else if (typeof raw === "string" && raw.length > 0) {
+            try {
+                const parsed = JSON.parse(raw);
+                for (const k in parsed)
+                    map[k] = parsed[k];
+            } catch (e) {}
+        }
+        map[screenName] = {
+            "wallpaper": wallpaper,
+            "parametersKey": paramsKey,
+            "foregroundPath": fgPath,
+            "backgroundPath": bgPath
+        };
+        pluginService.savePluginData(pluginId, "lastOutputs", map);
+    }
+
     function syncOutputs() {
         const next = {};
         const screens = Quickshell.screens;
+        let map = pluginData.lastOutputs || null;
+        if (typeof map === "string") {
+            try { map = JSON.parse(map); } catch (e) { map = null; }
+        }
         for (let index = 0; index < screens.length; index++) {
             const name = screens[index].name;
             const wallpaper = wallpaperFor(name);
@@ -339,12 +412,21 @@ PluginComponent {
             }
             if (row.wallpaper !== wallpaper) {
                 row.wallpaper = wallpaper;
-                row.foregroundPath = "";
-                row.backgroundPath = "";
-                row.message = "";
-                row.elapsedMs = 0;
-                row.cacheHit = false;
-                row.state = wallpaper === "" ? "empty" : "pending";
+                const cached = (map && typeof map === "object") ? map[name] : null;
+                if (cached && cached.wallpaper === wallpaper && cached.parametersKey === parametersKey && cached.foregroundPath && cached.backgroundPath) {
+                    row.foregroundPath = cached.foregroundPath;
+                    row.backgroundPath = cached.backgroundPath;
+                    row.state = "ready";
+                    row.cacheHit = true;
+                    row.message = "";
+                } else {
+                    row.foregroundPath = "";
+                    row.backgroundPath = "";
+                    row.message = "";
+                    row.elapsedMs = 0;
+                    row.cacheHit = false;
+                    row.state = wallpaper === "" ? "empty" : "pending";
+                }
             } else if (row.state === undefined) {
                 row.state = wallpaper === "" ? "empty" : "pending";
             }
@@ -356,24 +438,35 @@ PluginComponent {
         publish();
     }
 
+    Timer {
+        id: paramDebounceTimer
+
+        interval: 150
+        repeat: false
+        onTriggered: {
+            if (root.autoGenerate)
+                root.enqueueAll();
+        }
+    }
+
     function syncParameters() {
-        // A parameter change invalidates every pair; drop them and rebuild.
+        // A parameter change updates the split; DO NOT clear current paths.
+        // Keeping the current surfaces visible prevents flickering while
+        // the engine computes the new split asynchronously.
         const next = {};
         for (const name in outputs) {
             const row = {};
             for (const key in outputs[name])
                 row[key] = outputs[name][key];
             if (row.wallpaper) {
-                row.state = "pending";
-                row.foregroundPath = "";
-                row.backgroundPath = "";
+                row.state = row.foregroundPath ? "ready" : "pending";
             }
             next[name] = row;
         }
         outputs = next;
         queue = [];
         if (autoGenerate)
-            enqueueAll();
+            paramDebounceTimer.restart();
         publish();
     }
 
@@ -439,9 +532,18 @@ PluginComponent {
                     parsed = null;
                 }
                 root.modelReady = parsed !== null && parsed.ready === true;
-                root.modelBusy = false;
-                if (!root.modelReady)
-                    root.engineProblem = I18n.tr("Install the depth model from the plugin settings.");
+                root.availableModels = parsed && parsed.availableModels ? parsed.availableModels : [];
+                root.currentModelInfo = parsed && parsed.model ? parsed.model : null;
+                if (!root.modelReady) {
+                    root.engineProblem = I18n.tr("Depth model is downloading or not installed.");
+                    if (root.autoGenerate && !setupProcess.running && !root.modelBusy) {
+                        root.installModel();
+                    }
+                } else {
+                    root.engineProblem = "";
+                    root.modelBusy = false;
+                }
+                root.publish();
                 root.syncOutputs();
             }
         }
@@ -453,10 +555,17 @@ PluginComponent {
         command: []
         onExited: exitCode => {
             root.modelBusy = false;
+            root.installingModel = "";
             if (exitCode !== 0) {
                 root.engineProblem = root.shortError();
+                if (typeof ToastService !== "undefined" && ToastService.showError) {
+                    ToastService.showError("Depthscape", I18n.tr("Model download failed: ") + root.engineProblem, "", "depthscape-setup-fail");
+                }
                 root.publish();
                 return;
+            }
+            if (typeof ToastService !== "undefined" && ToastService.showInfo) {
+                ToastService.showInfo("Depthscape", I18n.tr("Model successfully downloaded and verified"), "", "depthscape-setup-success");
             }
             root.checkModel();
         }
@@ -506,35 +615,45 @@ PluginComponent {
     // cheap by comparison: one short-lived process every few hundred
     // milliseconds.
     //
-    // WHAT THE OVERVIEW SHOWS — three surfaces, faded as one
+    // WHAT THE OVERVIEW SHOWS — a backdrop that stays, two layers that fade
     //
     // An earlier revision unmapped the widgets and the foreground here, on the
     // assumption that they would otherwise be cloned into every workspace card.
-    // That was measured to be wrong twice over:
+    // That was measured to be wrong: all three surfaces carry the same
+    // `place-within-backdrop` rule, so they join the *shared* backdrop rather
+    // than being cloned per card, and DMS's own desktop widgets stay mapped for
+    // the whole overview on the same layer — hiding ours was stricter than the
+    // thing it was trying to match.
     //
-    //   * All three surfaces carry the same `place-within-backdrop` rule, so
-    //     they join the *shared* backdrop rather than being cloned per card.
-    //     DMS's own desktop widgets stay mapped for the whole overview on the
-    //     same layer, which is the control: hiding ours was stricter than the
-    //     thing it was trying to match.
-    //   * The disappearance was a hard cut. The subject and the clock vanished
-    //     between one frame and the next while the background cross-faded to its
-    //     blurred state beside them — two transitions at different speeds in the
-    //     same corner of the screen.
+    // A second revision kept all three mapped and faded *all three* together.
+    // That was wrong in the other direction, and it is the one that produced the
+    // doubled subject people noticed: our whole scene at 12 % over DMS's
+    // wallpaper at 100 % is `0.12 * ours + 0.88 * DMS`, in which DMS's
+    // picture is the strong one. DMS's subject therefore appears beside ours,
+    // displaced by whatever parallax offset is live, and ours reads as its pale
+    // echo rather than as the subject.
     //
-    // So all three stay mapped and share one `overviewOpacity`. The background
-    // additionally blurs, matching DMS. Fading is the only one of the three
-    // options that removes the contradiction instead of negotiating with it:
-    // freezing leaves a compensation jump for whenever the offset moved while
-    // the overview was open, and re-centring invents motion at the exact moment
-    // the blur begins.
+    // So the split is by role rather than by layer:
     //
-    // WHY THE OPACITY IS NOT ZERO
+    //   * The BACKGROUND stays at full opacity and blurs. It is the backdrop.
+    //     It is also the only thing covering DMS's wallpaper, so it cannot fade
+    //     without trading a ghost for a seam around every card.
+    //   * The WIDGETS and the FOREGROUND fade to `parallaxOverviewOpacity`.
+    //     They are the parts that would otherwise be drawn twice — once by us
+    //     and once by DMS's wallpaper behind — and fading is the only one of the
+    //     three options that removes that contradiction instead of negotiating
+    //     with it. Freezing them leaves a compensation jump for whenever the
+    //     offset moved while the overview was open, and re-centring invents
+    //     motion at the exact moment the blur begins.
     //
-    // At zero the workspace cards expose DMS's native wallpaper underneath,
-    // whose brightness does not match the just-blurred edge of our background and
-    // leaves a visible seam around every card. A trace of our own scene keeps
-    // that seam filled without reasserting the wallpaper.
+    // WHY THE TRACE IS NOT ZERO
+    //
+    // A trace rather than a clean removal, because a hard cut is worse: the
+    // subject and the clock used to vanish between one frame and the next while
+    // the background cross-faded beside them, which reads as two transitions at
+    // different speeds in the same corner of the screen. A low opacity keeps
+    // them present enough to belong to the card while being far too faint to
+    // compete with DMS's layer underneath.
     property bool inOverview: false
 
     /// Drives the fade without opening the real overview, so the transition can
@@ -544,13 +663,43 @@ PluginComponent {
     readonly property bool overviewActive: overviewActiveOverride
         || (inOverview && fadeInOverview)
 
-    /// The single opacity all three surfaces are given. `1` outside the
-    /// overview; the configured trace while it is open. One value for all three,
-    /// never per-surface: the subject's silhouette has to stay registered against
-    /// the hole it was cut from, and two disagreeing opacities read as a seam
-    /// along the contour.
+    /// The opacity the foreground and the widget layer are given. `1` outside the
+    /// overview; the configured trace while it is open.
+    ///
+    /// ONE VALUE FOR BOTH OF THE MOVING PARTS, never per-surface: the subject's
+    /// silhouette has to stay registered against the hole it was cut from, and two
+    /// disagreeing opacities read as a seam along the contour.
+    ///
+    /// THE BACKGROUND IS NOT FADED AT ALL, and that is the whole fix for the
+    /// doubled subject. It used to share this factor, and the arithmetic of that
+    /// is what produced the ghost:
+    ///
+    ///     screen = 0.12 * ours + 0.88 * DMS's wallpaper
+    ///
+    /// DMS paints the same picture underneath at full opacity, so at a 12 % trace
+    /// *its* subject is the strong one and ours is the faint one — and because DMS
+    /// applies no parallax of its own, its subject sits at the wallpaper's home
+    /// position while ours sits wherever the navigation has taken it. Two
+    /// silhouettes, at a displacement equal to the parallax offset, which is
+    /// exactly what a double image is. Measured on this arrangement: the ghost
+    /// centroid lands at (1499, 919), the raw wallpaper's own subject centroid, and
+    /// our subject at (1570, 1000) — 70 px apart horizontally against a live offset
+    /// of 307.
+    ///
+    /// The background is the one layer that must NOT fade, because it is the only
+    /// thing covering DMS's wallpaper. Fading it trades a ghost for a seam: at zero
+    /// the workspace cards expose DMS's picture directly, whose brightness does not
+    /// match ours and leaves a visible edge around every card. Holding it at 1
+    /// means the overview always shows our scene, blurred, with the subject and the
+    /// clock faded off it — which is the same picture the reference implementation
+    /// settles on, and the same one the cards are supposed to be showing.
     readonly property real overviewOpacity: ScrollMath.overviewOpacity(
         overviewActive, parallaxOverviewOpacity)
+
+    /// The background's opacity: never anything but fully present. Named rather
+    /// than written as a literal at the delegate so that the intent survives the
+    /// next person who notices the two differ and assumes it is a bug.
+    readonly property real overviewBackgroundOpacity: 1.0
 
     // THE CATCH-UP AFTER AN OVERVIEW
     //
@@ -671,18 +820,20 @@ PluginComponent {
     function checkModel() {
         if (enginePath === "")
             return;
-        statusProcess.command = [enginePath, "status"];
+        statusProcess.command = [enginePath, "status", "--model", root.modelType];
         statusProcess.running = true;
     }
 
-    function installModel() {
+    function installModel(targetModel) {
         if (enginePath === "" || modelBusy)
             return;
+        const toInstall = targetModel || root.modelType;
         modelBusy = true;
+        installingModel = toInstall;
         engineProblem = "";
         publish();
         lastStderr = "";
-        setupProcess.command = [enginePath, "setup"];
+        setupProcess.command = [enginePath, "setup", "--model", toInstall];
         setupProcess.running = true;
     }
 
@@ -762,21 +913,34 @@ PluginComponent {
         pluginService.savePluginData(pluginId, "action", "");
         if (action === "install")
             installModel();
+        else if (action.startsWith("install:"))
+            installModel(action.substring(8));
         else if (action === "generate")
             enqueueAll();
         else if (action === "clearCache")
             clearCache();
         else if (action === "exampleLayout")
             writeExampleLayout();
+        else if (action === "resetDefaults")
+            resetAllDefaults();
         return true;
+    }
+
+    function resetAllDefaults() {
+        for (const group of surfaceGroups) {
+            if (group.tracker)
+                group.tracker.reset();
+        }
+        _lastParametersKey = "";
+        syncParameters();
     }
 
     IpcHandler {
         target: "depthscape"
 
-        function install(): string {
-            root.installModel();
-            return "installing depth model";
+        function install(modelName: string): string {
+            root.installModel(modelName);
+            return "installing model: " + (modelName || root.modelType);
         }
 
         function generate(): string {
@@ -787,6 +951,11 @@ PluginComponent {
         function clearCache(): string {
             root.clearCache();
             return "clearing cache";
+        }
+
+        function remap(): string {
+            root.remap();
+            return "remapped";
         }
 
         function debug(): string {
@@ -801,7 +970,9 @@ PluginComponent {
             return JSON.stringify({
                 "effectEnabled": root.effectEnabled,
                 "widgetsEnabled": root.widgetsEnabled,
+                "modelType": root.modelType,
                 "modelReady": root.modelReady,
+                "modelBusy": root.modelBusy,
                 "enginePath": root.enginePath,
                 "dataRoot": root.dataRoot,
                 "layoutPath": root.layoutPath,
@@ -842,7 +1013,6 @@ PluginComponent {
                 "travel": root.parallaxTravel,
                 "stepVertical": root.parallaxStepVertical,
                 "stepHorizontal": root.parallaxStepHorizontal,
-                "backgroundRatio": root.parallaxBackgroundRatio,
                 "inverted": root.parallaxInverted,
                 "trackedOutput": Quickshell.screens.length > 0
                     ? Quickshell.screens[0].name : "",
@@ -965,21 +1135,33 @@ PluginComponent {
         }
     }
 
+    Timer {
+        id: wallpaperSettle
+        interval: 1200
+        onTriggered: root.remap()
+    }
+
     Connections {
         target: SessionData
 
         function onWallpaperPathChanged() {
             root.syncOutputs();
+            wallpaperSettle.restart();
         }
 
         function onMonitorWallpapersChanged() {
             root.syncOutputs();
+            wallpaperSettle.restart();
         }
 
         function onPerMonitorWallpaperChanged() {
             root.syncOutputs();
+            wallpaperSettle.restart();
         }
     }
+
+    property string _lastParametersKey: parametersKey
+    property string _lastModelType: modelType
 
     Connections {
         target: pluginService
@@ -987,11 +1169,27 @@ PluginComponent {
         function onPluginDataChanged(changedId) {
             if (changedId !== root.pluginId)
                 return;
+
             // A pending action is not a settings change: dispatching one must
             // not also invalidate every cached pair.
             if (root.consumeAction())
                 return;
-            root.syncParameters();
+
+            if (root.modelType !== root._lastModelType) {
+                root._lastModelType = root.modelType;
+                root._lastParametersKey = root.parametersKey;
+                if (setupProcess.running)
+                    setupProcess.running = false;
+                root.checkModel();
+                return;
+            }
+
+            // Only trigger image split sync if the image-splitting parameters actually changed.
+            // Changes to parallax or overview settings do not affect image masks and must not flash.
+            if (root.parametersKey !== root._lastParametersKey) {
+                root._lastParametersKey = root.parametersKey;
+                root.syncParameters();
+            }
         }
     }
 
@@ -1003,37 +1201,49 @@ PluginComponent {
         }
     }
 
-
     // ------------------------------------------------------- surface composition
     //
-    // Three full-screen surfaces on the `background` layer. Within a layer,
-    // surfaces stack by map order — the last one mapped is drawn on top — and
-    // wlr-layer-shell has no raise request, so map order is the only control.
-    //
-    // DECLARATION ORDER IS NOT MAP ORDER
-    //
-    // Measured: creating all three together in one component tree does not
-    // produce a reliable stack. QML realises each `PanelWindow` asynchronously as
-    // its Wayland object is created, so the compositor sees three maps in
-    // whatever order they happen to become ready — and with two screens the
-    // delegates interleave with each other as well. The symptom is the
-    // foreground rendering correctly but sitting *under* the background, so the
-    // subject is invisible and the screen shows only the filled background.
-    //
-    // The fix is to map them in sequence rather than at once: each surface is
-    // gated on a stage counter that advances one step per `stageTimer` tick, so
-    // the compositor is handed exactly one new window at a time and the stack
-    // follows the stage order deterministically. The 32ms tick is the same
-    // budget DMS uses for its own equivalent (DesktopWidgetLayer.qml
-    // `rebuildApply`).
-    //
-    // The `Loader` wrapping lets the whole group be destroyed and rebuilt, which
-    // is needed because DMS maps its own wallpaper asynchronously and can settle
-    // on top of a group that mapped earlier.
+    // Let the native DMS image map first. Native remains a fallback underneath;
+    // all visible plugin images share the backdrop, not the workspace cards.
+    property bool surfacesMapped: false
+
+    Timer {
+        id: startupMapTimer
+        interval: NiriService.hasInitialConnection ? 100 : 1400
+        running: true
+        onTriggered: root.surfacesMapped = true
+    }
+
+    Connections {
+        target: NiriService
+        function onHasInitialConnectionChanged() {
+            if (NiriService.hasInitialConnection && !root.surfacesMapped) {
+                startupMapTimer.interval = 1200;
+                startupMapTimer.restart();
+            }
+        }
+    }
+
+    function remap() {
+        surfacesMapped = false;
+        remapTimer.restart();
+    }
+
+    Timer {
+        id: remapTimer
+        interval: 32
+        repeat: false
+        onTriggered: {
+            root.surfaceGroups = [];
+            root.surfacesMapped = true;
+            stageTimer.restart();
+        }
+    }
+
     Loader {
         id: surfaceLoader
 
-        active: true
+        active: root.surfacesMapped && CompositorService.isNiri
         sourceComponent: Component {
             Variants {
                 model: Quickshell.screens
@@ -1086,21 +1296,26 @@ PluginComponent {
 
                     // THE TWO MOVING LAYERS, and the whole of the parallax.
                     //
-                    // The background takes a fraction of the foreground's travel
-                    // in the OPPOSITE direction. Opposite rather than merely
-                    // smaller: one plane sliding rigidly would not read as depth
-                    // at all, and moving only the subject over a pinned
-                    // background was measured to look like a misaligned mask
-                    // rather than like distance.
+                    // Both take exactly the same offset. This is not a
+                    // simplification and it is not unfinished: the two images are
+                    // a matched pair of one scene, and the background is the same
+                    // picture with the subject's own region filled in by an
+                    // estimate of its surroundings. Give them different offsets
+                    // and the subject slides away from the hole it is supposed to
+                    // be covering — the fill shows through beside it, and the
+                    // edge reads as a badly cut-out mask rather than as depth.
                     //
-                    // The widgets are deliberately absent from this pair — they
-                    // sit on the wallpaper and do not move.
+                    // The parallax does not come from the two layers diverging.
+                    // It comes from the pair moving together against the widgets,
+                    // which hold still: they are painted on the wallpaper, they
+                    // are what the subject stands in front of, and they are the
+                    // reference the movement is read against. Moving them too
+                    // would move the reference along with everything else and
+                    // leave nothing to see the motion against.
                     readonly property real foregroundOffsetX: tracker.offsetX
                     readonly property real foregroundOffsetY: tracker.offsetY
-                    readonly property real backgroundOffsetX:
-                        -tracker.offsetX * root.parallaxBackgroundRatio
-                    readonly property real backgroundOffsetY:
-                        -tracker.offsetY * root.parallaxBackgroundRatio
+                    readonly property real backgroundOffsetX: tracker.offsetX
+                    readonly property real backgroundOffsetY: tracker.offsetY
 
                     /// Slack the background carries, in output logical pixels, so
                     /// a shift slides new material into view instead of pulling
@@ -1128,10 +1343,13 @@ PluginComponent {
                     // background is wanted continuously, so unmapping it would
                     // briefly expose the wallpaper DMS draws underneath.
                     onWantedChanged: {
-                        if (wanted === 0)
+                        if (wanted === 0) {
+                            stage = 0;
                             return;
-                        stage = (wantBackground && stage >= 1) ? 1 : 0;
-                        stageTimer.restart();
+                        }
+                        if (stage === 0) {
+                            stageTimer.restart();
+                        }
                     }
 
                     // Which surfaces of this output are mapped so far. 0 = none.
@@ -1167,17 +1385,18 @@ PluginComponent {
                     // and in the overview it would be an empty hole in the
                     // shared backdrop.
                     //
-                    // NONE OF THE THREE IS GATED ON `inOverview` ANY MORE. All
-                    // three carry the same `place-within-backdrop` rule, so they
-                    // join the shared backdrop rather than being cloned into each
-                    // card — and the overview now fades them together instead of
-                    // unmapping two of them. See the long note on `inOverview`.
+                    // All three carry the same `place-within-backdrop` rule, so
+                    // they join the shared backdrop rather than being cloned into
+                    // each card. They differ in how they behave once there — see
+                    // the note on `overviewOpacity`: the background stays opaque
+                    // and the other two fade.
                     readonly property bool wantForeground: root.effectEnabled
                         && root.foregroundFor(modelData.name) !== ""
                     readonly property bool wantBackground: root.effectEnabled
                         && root.backgroundFor(modelData.name) !== ""
                     readonly property bool wantWidgets: root.effectEnabled
                         && root.widgetsEnabled
+                        && wantBackground
 
                     // Each surface is mapped on its own step, in dependency order,
                     // so the compositor is handed one window at a time and the
@@ -1193,6 +1412,10 @@ PluginComponent {
                     // Stays mapped in the overview, blurs itself there, and
                     // carries the slack that keeps a parallax shift from pulling
                     // its own border on screen.
+                    //
+                    // The ONE layer that does not fade: it is the backdrop, and
+                    // fading it would let DMS's wallpaper show through and double
+                    // the subject. See `overviewBackgroundOpacity`.
                     DepthBackground {
                         targetScreen: surfaces.modelData
                         backgroundPath: surfaces.showBackground
@@ -1201,8 +1424,9 @@ PluginComponent {
                         blurred: root.inOverview && root.blurInOverview
                         offsetX: surfaces.backgroundOffsetX
                         offsetY: surfaces.backgroundOffsetY
+                        motionDuration: root.parallaxMotionDuration
                         reserve: surfaces.reserve
-                        overviewOpacity: root.overviewOpacity
+                        overviewOpacity: root.overviewBackgroundOpacity
                         visible: surfaces.showBackground
                     }
 
@@ -1239,6 +1463,8 @@ PluginComponent {
                             : ""
                         offsetX: surfaces.foregroundOffsetX
                         offsetY: surfaces.foregroundOffsetY
+                        motionDuration: root.parallaxMotionDuration
+                        reserve: surfaces.reserve
                         overviewOpacity: root.overviewOpacity
                         visible: surfaces.showForeground
                     }
@@ -1275,86 +1501,22 @@ PluginComponent {
         }
     }
 
-    // Re-mapping is not instantaneous: the compositor has to process the unmap
-    // before the new surfaces can claim the top of the layer. DMS waits 32ms in
-    // its own equivalent (DesktopWidgetLayer.qml `rebuildApply`); match that.
-    Timer {
-        id: remapTimer
-
-        interval: 32
-        repeat: false
-        onTriggered: {
-            surfaceLoader.active = true;
-            stageTimer.restart();
-        }
-    }
-
-    /// Tear down and rebuild every Depthscape surface.
-    ///
-    /// The only way to re-assert stacking within a layer: there is no raise
-    /// request in wlr-layer-shell, so a surface that has been mapped over has to
-    /// be unmapped and mapped again. Rebuilding resets every delegate to stage 0,
-    /// which re-runs the staged mapping described above.
-    function raiseSurfaces() {
-        surfaceLoader.active = false;
-        // The delegates remove themselves on destruction, but clearing here as
-        // well means a rebuild can never advance a stage on a half-dead group.
-        root.surfaceGroups = [];
-        remapTimer.restart();
-    }
-
-    // DMS maps its wallpaper asynchronously, so on a cold start it can settle on
-    // top of a group that mapped earlier. Re-creating our surfaces after it has
-    // had time to land puts us above it again.
-    //
-    // WHY THE BACKDROP MAKES THIS A RACE
-    //
-    // DMS's wallpaper lives in the same shared backdrop as our three surfaces:
-    // its generated `dms:blurwallpaper` rule and the user's `^quickshell$` rule
-    // both set `place-within-backdrop`, and so does our `^depthscape:` rule.
-    // niri renders that backdrop in *map* order — `layers_in_render_order` in
-    // niri.rs walks `layer_map.layers_on(Layer::Background).rev()`, so whichever
-    // surface was mapped last draws on top. "Who wins the backdrop" is therefore
-    // a question of *when*, not of layer: all four surfaces are on the same
-    // layer, and the last one mapped is the one visible.
-    //
-    // DMS rebuilds its wallpaper when `pluginReadyKey` changes, which follows the
-    // plugin list finishing its load — after this daemon has already mapped its
-    // own surfaces. There is no event to wait on from here: a plugin's view of
-    // DMS's services is reduced (see the note on `inOverview`), and the wallpaper
-    // is not owned by anything this daemon can observe. So the stack is
-    // re-asserted a few times across the window in which DMS settles. The cost of
-    // a late raise is one frame of discontinuity; the cost of missing it is our
-    // composite being covered by DMS's wallpaper while every one of our surfaces
-    // still reports itself healthy — invisible failure, and much worse to
-    // diagnose. Measured: with a single raise at 3s the composite loses that race
-    // and only the widgets remain visible; re-raising holds it.
-    //
-    // 3000ms is a bound, not a synchronisation: DMS's own sequence is an image
-    // load followed by a few settle frames, and a 5K wallpaper has been measured
-    // at ~900ms end to end on this machine.
-    Timer {
-        id: startupRaise
-
-        interval: 3000
-        running: true
-        repeat: true
-        property int fired: 0
-        // Four attempts span 3s..12s. Enough to cover DMS's settle and its
-        // plugin-driven rebuild; short enough that a user never notices.
-        onTriggered: {
-            root.raiseSurfaces();
-            fired += 1;
-            if (fired >= 4)
-                startupRaise.stop();
-        }
-    }
-
     Component.onCompleted: {
+        if (pluginService && pluginService.pluginInstances && !pluginService.pluginInstances[pluginId]) {
+            const newInstances = Object.assign({}, pluginService.pluginInstances);
+            newInstances[pluginId] = root;
+            pluginService.pluginInstances = newInstances;
+        }
+        root.loadInitialOutputs();
         console.info("Depthscape: daemon started");
     }
 
     Component.onDestruction: {
+        if (pluginService && pluginService.pluginInstances && pluginService.pluginInstances[pluginId] === root) {
+            const newInstances = Object.assign({}, pluginService.pluginInstances);
+            delete newInstances[pluginId];
+            pluginService.pluginInstances = newInstances;
+        }
         console.info("Depthscape: daemon stopped");
     }
 }

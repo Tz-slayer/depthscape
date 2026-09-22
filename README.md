@@ -17,9 +17,9 @@ compositing, so nothing is inferred while you work.
 - Three-tier cache: dragging the sliders re-runs the split only, never the model
 - One wallpaper per monitor, split independently
 - Click-through surfaces, so the widgets underneath stay usable
-- Navigation parallax: moving between workspaces and columns slides the subject
-  and the background in opposite directions, and stepping back returns the scene
-  exactly where it started
+- Navigation parallax: moving between workspaces and columns slides the scene
+  (subject and background together) over stationary desktop widgets, and
+  stepping back returns the scene exactly where it started
 - Owns the niri overview backdrop, so the workspace cards share one continuous
   wallpaper instead of repeating a copy per card
 - Desktop status tile and a settings page
@@ -97,12 +97,14 @@ names suggest.
 
 ## Parallax
 
-Moving between workspaces and columns slides the scene. The subject and the
-background move in opposite directions — the subject with the navigation, the
-background against it at a third of the distance — which is what produces the
-depth. Only those two layers move: the widgets hold still, because they are the
-thing the subject stands in front of and therefore the reference frame the depth
-is read against.
+Moving between workspaces and columns slides the whole scene — the subject and
+the background together, by exactly the same amount. They are a matched pair of
+one image: the background is the same scene with the subject's region infilled,
+so anything less than an identical shift would pull the subject away from the hole
+it covers and expose the inpainting artifacts. The depth comes from the pair
+moving together against desktop widgets (like the clock and cards), which hold
+still: they are what the subject stands in front of and therefore the reference
+frame the depth is read against.
 
 The offset is *cumulative*, not a per-keypress animation: each step moves the
 scene by a little less than the one before, and stepping back retraces the same
@@ -158,8 +160,11 @@ Then enable **Depthscape** under **Settings → Plugins**.
 
 ## First run
 
-1. Open the plugin settings and press **Install model**. This downloads 99 MB
-   from Hugging Face and verifies a pinned SHA-256.
+1. Open the plugin settings and select your preferred **Depth model variant**:
+   - **Small** (~99 MB, fast & lightweight, default)
+   - **Base** (~389 MB, balanced precision & sharper edges)
+   - **Large** (~1.34 GB, top depth accuracy & fine subject contours)
+   The engine automatically downloads and verifies the model on demand, or you can click **Install model**.
 2. Set an **image** wallpaper on each monitor. Solid colours are skipped.
 3. The split is generated automatically. If the result is too aggressive or too
    subtle, adjust **Foreground threshold** and **Edge feather**.

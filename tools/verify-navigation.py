@@ -50,14 +50,13 @@ def action(*args: str) -> None:
 
 
 def focused_is_clear() -> bool:
-    workspaces = json.loads(subprocess.run(
-        ["niri", "msg", "--json", "workspaces"],
-        capture_output=True, text=True).stdout)
-    active = [w["id"] for w in workspaces if w.get("is_active")]
-    windows = json.loads(subprocess.run(
-        ["niri", "msg", "--json", "windows"],
-        capture_output=True, text=True).stdout)
-    return not any(w.get("workspace_id") in active for w in windows)
+    """Delegate to the shared check so there is one definition of "clear".
+
+    Phase 2 of verify-parallax.py explains why this has to be per *output* and
+    not per session; keeping a second, subtly different copy here is how the two
+    drift apart and one of them starts lying.
+    """
+    return vp.focused_workspace_is_clear()
 
 
 def workspace_layout() -> str:

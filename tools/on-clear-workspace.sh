@@ -23,12 +23,32 @@
 
 set -euo pipefail
 
+# Clear on the FOCUSED OUTPUT, not clear anywhere in the session.
+#
+# `is_active` is a single global flag — exactly one workspace in the whole
+# session carries it — while `screenshot-screen` captures the *focused output*.
+# Asking about the flag therefore answers a question about whichever output
+# holds focus, which is not necessarily the one being captured. On one monitor
+# the two coincide and this is invisible; with two, this can walk to an empty
+# workspace on one screen and then screenshot the other one, full of windows.
+# Measured cost of getting it wrong: the harness reports an MAE around 120/255
+# and it reads as a catastrophically broken wallpaper rather than as a camera
+# pointed at the wrong monitor.
 workspace_is_clear() {
     python3 -c '
 import json, subprocess, sys
+out = subprocess.run(["niri", "msg", "focused-output"],
+                     capture_output=True, text=True).stdout
+first = out.splitlines()[0] if out.splitlines() else ""
+if not ("(" in first and first.rstrip().endswith(")")):
+    sys.exit(1)
+output = first.rstrip()[:-1].rsplit("(", 1)[1]
 ws = json.loads(subprocess.run(["niri", "msg", "--json", "workspaces"],
                                capture_output=True, text=True).stdout)
-active = [w["id"] for w in ws if w.get("is_active")]
+active = [w["id"] for w in ws
+          if w.get("output") == output and w.get("is_active")]
+if not active:
+    sys.exit(1)
 wins = json.loads(subprocess.run(["niri", "msg", "--json", "windows"],
                                  capture_output=True, text=True).stdout)
 sys.exit(0 if not any(w.get("workspace_id") in active for w in wins) else 1)

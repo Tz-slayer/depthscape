@@ -17,12 +17,15 @@ pub const NEAR_IS_HIGH: bool = true;
 const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const STD: [f32; 3] = [0.229, 0.224, 0.225];
 
+use crate::config::ModelKind;
+
 pub struct DepthModel {
     session: Session,
+    kind: ModelKind,
 }
 
 impl DepthModel {
-    pub fn load(model_path: &Path) -> Result<Self> {
+    pub fn load(model_path: &Path, kind: ModelKind) -> Result<Self> {
         let threads = std::thread::available_parallelism()
             .map(|value| value.get())
             .unwrap_or(4)
@@ -35,11 +38,11 @@ impl DepthModel {
             .map_err(|error| {
                 anyhow::anyhow!("cannot load {}: {error}", model_path.display())
             })?;
-        Ok(Self { session })
+        Ok(Self { session, kind })
     }
 
-    /// Run depth estimation on RGB8 pixels and return a normalised `0.0..=1.0`
-    /// depth field of shape `height * width`.
+    /// Run depth estimation or foreground segmentation on RGB8 pixels and return a normalised `0.0..=1.0`
+    /// field of shape `height * width`.
     pub fn infer(&mut self, rgb: &[u8], width: u32, height: u32) -> Result<Vec<f32>> {
         let expected = (width as usize) * (height as usize) * 3;
         if rgb.len() != expected {
@@ -60,11 +63,11 @@ impl DepthModel {
         let outputs = self
             .session
             .run(ort::inputs![input])
-            .map_err(|error| anyhow::anyhow!("depth inference failed: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("inference failed: {error}"))?;
 
         let output = outputs[0]
             .try_extract_array::<f32>()
-            .map_err(|error| anyhow::anyhow!("depth output is not an f32 tensor: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("model output is not an f32 tensor: {error}"))?;
         let data: Vec<f32> = output.iter().copied().collect();
 
         let pixels = (width as usize) * (height as usize);
@@ -75,7 +78,10 @@ impl DepthModel {
             );
         }
 
-        Ok(normalise(&data))
+        match self.kind {
+            ModelKind::DepthAnything => Ok(normalise(&data)),
+            ModelKind::BiRefNet => Ok(sigmoid_mask(&data)),
+        }
     }
 }
 
@@ -90,6 +96,21 @@ fn to_normalised_chw(rgb: &[u8], width: u32, height: u32) -> Vec<f32> {
         }
     }
     planar
+}
+
+/// Apply sigmoid to raw logits from BiRefNet: `1 / (1 + exp(-x))`.
+/// Maps logits to calibrated foreground probabilities in `0.0..=1.0`.
+fn sigmoid_mask(values: &[f32]) -> Vec<f32> {
+    values
+        .iter()
+        .map(|&value| {
+            if !value.is_finite() {
+                0.0
+            } else {
+                (1.0 / (1.0 + (-value).exp())).clamp(0.0, 1.0)
+            }
+        })
+        .collect()
 }
 
 /// Min-max scale to `0.0..=1.0`.
@@ -149,6 +170,38 @@ mod tests {
         for (channel, value) in planar.iter().enumerate() {
             let expected = (1.0 - MEAN[channel]) / STD[channel];
             assert!((value - expected).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn sigmoid_mask_maps_logits_correctly() {
+        let res = sigmoid_mask(&[0.0, -100.0, 100.0, f32::NAN]);
+        assert!((res[0] - 0.5).abs() < 1e-6);
+        assert_eq!(res[1], 0.0);
+        assert_eq!(res[2], 1.0);
+        assert_eq!(res[3], 0.0);
+    }
+
+    #[test]
+    fn birefnet_session_inspection() {
+        let home = match std::env::var("HOME") {
+            Ok(val) => val,
+            Err(_) => return,
+        };
+        let path = std::path::PathBuf::from(home).join(".local/share/depthscape/models/birefnet-lite/model.onnx");
+        if !path.exists() {
+            return;
+        }
+        let session = Session::builder().unwrap().commit_from_file(&path).unwrap();
+        assert_eq!(session.inputs().len(), 1);
+        assert_eq!(session.outputs().len(), 1);
+
+        let dummy_rgb = vec![128u8; 1024 * 1024 * 3];
+        let mut model = DepthModel::load(&path, crate::config::ModelKind::BiRefNet).unwrap();
+        let result = model.infer(&dummy_rgb, 1024, 1024).unwrap();
+        assert_eq!(result.len(), 1024 * 1024);
+        for &v in &result {
+            assert!((0.0..=1.0).contains(&v));
         }
     }
 }

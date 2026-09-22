@@ -7,25 +7,116 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 /// Upstream model revision. Used to build the download URL.
-pub const MODEL_REVISION: &str = "4472b7362082ad9968fee890ca0f1e5aca36b93d";
+pub const MODEL_REVISION: &str = "main";
 
-/// SHA-256 published for the upstream artifact.
-///
-/// Deliberately SHA-256 rather than BLAKE3: it is the value users can verify
-/// against the Hugging Face page by hand. Internal cache keys use BLAKE3.
-pub const MODEL_SHA256: &str = "afb6a5c28f3b6bf1618c6e43f02073ef9dfdc70e937502d51603e57b0a1df10c";
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelKind {
+    DepthAnything,
+    BiRefNet,
+}
 
-/// Exact byte size of the upstream artifact.
-pub const MODEL_SIZE: u64 = 99_060_839;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelDescriptor {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub kind: ModelKind,
+    pub size: u64,
+    pub sha256: &'static str,
+    pub fingerprint: &'static str,
+    pub url: &'static str,
+    pub directory: &'static str,
+    pub filename: &'static str,
+}
 
-pub const MODEL_URL: &str = "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/4472b7362082ad9968fee890ca0f1e5aca36b93d/onnx/model.onnx?download=true";
+pub const MODEL_SMALL: ModelDescriptor = ModelDescriptor {
+    id: "small",
+    name: "Depth Anything V2 Small (99MB)",
+    kind: ModelKind::DepthAnything,
+    size: 99_060_839,
+    sha256: "afb6a5c28f3b6bf1618c6e43f02073ef9dfdc70e937502d51603e57b0a1df10c",
+    fingerprint: "afb6a5c28f3b6bf1",
+    url: "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model.onnx?download=true",
+    directory: "models/depth-anything-v2-small",
+    filename: "model.onnx",
+};
 
-/// Short fingerprint mixed into every cache key.
-pub const MODEL_FINGERPRINT: &str = "afb6a5c28f3b6bf1";
+pub const MODEL_BASE: ModelDescriptor = ModelDescriptor {
+    id: "base",
+    name: "Depth Anything V2 Base (389MB)",
+    kind: ModelKind::DepthAnything,
+    size: 388_917_010,
+    sha256: "dab40f67d5ead5e0ed52acfae41a717a708b02bc57f6cb761c5de828f26a7289",
+    fingerprint: "dab40f67d5ead5e0",
+    url: "https://huggingface.co/onnx-community/depth-anything-v2-base/resolve/main/onnx/model.onnx?download=true",
+    directory: "models/depth-anything-v2-base",
+    filename: "model.onnx",
+};
+
+pub const MODEL_LARGE: ModelDescriptor = ModelDescriptor {
+    id: "large",
+    name: "Depth Anything V2 Large (1.34GB)",
+    kind: ModelKind::DepthAnything,
+    size: 1_336_922_232,
+    sha256: "a93aa89b5e92e30e0afbe0f7c3ec692b35cfca791ae9004a190fb0ca2010e905",
+    fingerprint: "a93aa89b5e92e30e",
+    url: "https://huggingface.co/onnx-community/depth-anything-v2-large/resolve/main/onnx/model.onnx?download=true",
+    directory: "models/depth-anything-v2-large",
+    filename: "model.onnx",
+};
+
+pub const MODEL_BIREFNET_LITE: ModelDescriptor = ModelDescriptor {
+    id: "birefnet-lite",
+    name: "BiRefNet Lite (224MB)",
+    kind: ModelKind::BiRefNet,
+    size: 224_005_088,
+    sha256: "5600024376f572a557870a5eb0afb1e5961636bef4e1e22132025467d0f03333",
+    fingerprint: "5600024376f572a5",
+    url: "https://huggingface.co/onnx-community/BiRefNet_lite-ONNX/resolve/main/onnx/model.onnx?download=true",
+    directory: "models/birefnet-lite",
+    filename: "model.onnx",
+};
+
+pub const MODEL_BIREFNET: ModelDescriptor = ModelDescriptor {
+    id: "birefnet",
+    name: "BiRefNet General (973MB)",
+    kind: ModelKind::BiRefNet,
+    size: 972_666_916,
+    sha256: "58f621f00f5d756097615970a88a791584600dcf7c45b18a0a6267535a1ebd3c",
+    fingerprint: "58f621f00f5d7560",
+    url: "https://huggingface.co/onnx-community/BiRefNet-ONNX/resolve/main/onnx/model.onnx?download=true",
+    directory: "models/birefnet",
+    filename: "model.onnx",
+};
+
+pub const ALL_MODELS: &[ModelDescriptor] = &[
+    MODEL_SMALL,
+    MODEL_BASE,
+    MODEL_LARGE,
+    MODEL_BIREFNET_LITE,
+    MODEL_BIREFNET,
+];
+
+pub fn default_model() -> &'static ModelDescriptor {
+    &MODEL_SMALL
+}
+
+pub fn find_model(id: &str) -> Option<&'static ModelDescriptor> {
+    ALL_MODELS.iter().find(|m| m.id.eq_ignore_ascii_case(id))
+}
+
+#[allow(dead_code)]
+pub const MODEL_SHA256: &str = MODEL_SMALL.sha256;
+#[allow(dead_code)]
+pub const MODEL_SIZE: u64 = MODEL_SMALL.size;
+#[allow(dead_code)]
+pub const MODEL_URL: &str = MODEL_SMALL.url;
+#[allow(dead_code)]
+pub const MODEL_FINGERPRINT: &str = MODEL_SMALL.fingerprint;
 
 /// Model input is padded to a multiple of the ViT patch size.
 pub const INPUT_SIZE: u32 = 518;
 pub const PATCH_SIZE: u32 = 14;
+pub const BIREFNET_INPUT_SIZE: u32 = 1024;
 
 /// Bump when the depth post-processing changes (invalidates depth + refined).
 pub const DEPTH_PIPELINE_VERSION: u32 = 1;
@@ -133,6 +224,7 @@ pub const REFINED_CACHE_LIMIT: usize = 4;
 pub const SPLIT_CACHE_LIMIT: usize = 8;
 
 /// Relative layout inside the plugin data directory.
+#[allow(dead_code)]
 pub const DIR_MODEL: &str = "models/depth-anything-v2-small";
 pub const DIR_DEPTH_CACHE: &str = "cache/depth";
 pub const DIR_REFINED_CACHE: &str = "cache/refined";
@@ -166,8 +258,13 @@ impl Paths {
         &self.root
     }
 
+    #[allow(dead_code)]
     pub fn model(&self) -> PathBuf {
-        self.root.join(DIR_MODEL).join("model.onnx")
+        self.model_for(default_model())
+    }
+
+    pub fn model_for(&self, descriptor: &ModelDescriptor) -> PathBuf {
+        self.root.join(descriptor.directory).join(descriptor.filename)
     }
 
     pub fn depth_cache(&self) -> PathBuf {
@@ -191,8 +288,12 @@ impl Paths {
     }
 
     pub fn ensure(&self) -> Result<()> {
+        for m in ALL_MODELS {
+            let dir = self.root.join(m.directory);
+            std::fs::create_dir_all(&dir)
+                .with_context(|| format!("cannot create {}", dir.display()))?;
+        }
         for dir in [
-            self.root.join(DIR_MODEL),
             self.depth_cache(),
             self.refined_cache(),
             self.split_cache(),

@@ -273,4 +273,37 @@ test("settle duration stretches with distance but stays bounded", () => {
     assert.ok(large <= base * 4 + 1);
 });
 
+// ------------------------------------------------------------------ easing
+test("motionTau derives time constant from motion duration", () => {
+    assert.strictEqual(M.motionTau(300), 100);
+    assert.strictEqual(M.motionTau(0), 1);
+    assert.strictEqual(M.motionTau(-50), 1);
+});
+
+test("approach smoothly advances towards target", () => {
+    const start = 0;
+    const target = 100;
+    const dt = 16;
+    const tau = 100;
+    const next = M.approach(start, target, dt, tau);
+    assert.ok(next > start);
+    assert.ok(next < target);
+    // Zero dt does not advance
+    assert.strictEqual(M.approach(start, target, 0, tau), start);
+    // Negative dt does not advance
+    assert.strictEqual(M.approach(start, target, -5, tau), start);
+});
+
+test("approach snaps to target when within half pixel", () => {
+    const target = 100;
+    const near = 99.7;
+    const snapped = M.approach(near, target, 16, 100);
+    assert.strictEqual(snapped, target);
+
+    const nearBelow = 100.3;
+    const snappedBelow = M.approach(nearBelow, target, 16, 100);
+    assert.strictEqual(snappedBelow, target);
+});
+
 console.log("\n" + passed + " / " + passed + " passed");
+

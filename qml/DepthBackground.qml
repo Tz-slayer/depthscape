@@ -83,11 +83,19 @@ PanelWindow {
     /// (`SettingsData.blurWallpaperOnOverview`).
     property bool blurred: false
 
-    /// Parallax offset in output logical pixels, shared by all three surfaces of
-    /// this output. Supplied by DepthParallax; see DepthParallax.qml for the
-    /// curve and DepthForeground.qml for why the two layers move oppositely.
+    /// Parallax offset in output logical pixels — the same value the foreground
+    /// gets, not a fraction of it. Supplied by DepthParallax; see
+    /// DepthParallax.qml for the curve.
+    ///
+    /// Identical rather than proportional because this image is the same scene
+    /// with the subject's region filled in by an estimate of its surroundings.
+    /// Any difference would slide the subject away from the hole it is meant to
+    /// be covering and let the fill show beside it. It is the same registration
+    /// the two opacities have to keep, for the same reason.
     property real offsetX: 0
     property real offsetY: 0
+    property int motionDuration: 240
+    property bool initialized: false
 
     /// Spare area this surface must carry on every side, in output logical
     /// pixels, so that a shift slides new material into view instead of pulling
@@ -103,6 +111,7 @@ PanelWindow {
     property real overviewOpacity: 1
 
     readonly property bool active: backgroundPath !== ""
+    readonly property real dpr: (targetScreen && targetScreen.devicePixelRatio) ? targetScreen.devicePixelRatio : 1
 
     /// Overscan in logical pixels. Rounded up and given a small margin so an
     /// extreme travel still does not clip.
@@ -169,6 +178,8 @@ PanelWindow {
         Rectangle {
             anchors.fill: container
             color: SettingsData.effectiveWallpaperBackgroundColor
+            opacity: backdrop.opacity
+            visible: opacity > 0
         }
 
         // The oversized box. Its centre is the viewport's centre, so a child
@@ -189,27 +200,35 @@ PanelWindow {
         //     the parallax travel itself. The scene would be visibly off-centre
         //     while the user stood still.
         //
-        //   * A larger box with the image still sized to the viewport — what
-        //     this does. The image keeps the exact geometry the foreground uses,
-        //     so the two agree pixel for pixel at rest, and the surrounding
-        //     spare area is what a shift slides into view. Overscan and parallax
-        //     are therefore independent: the offset below is applied on top of
-        //     an image that has not moved at all.
+        //   * A larger box with the image filling it — what this does. The box
+        //     and the image grow together, so the margin around the viewport is
+        //     real picture that a shift slides into view rather than a stripe of
+        //     fill colour. DepthForeground sizes its copy to the same rectangle,
+        //     so the two agree pixel for pixel and the subject stays registered
+        //     with the hole it was cut from. The whole canvas is what moves; the
+        //     layout underneath it does not.
         Item {
             id: container
 
-            x: -root.overscan
-            y: -root.overscan
+            x: -root.overscan + root.offsetX
+            y: -root.overscan + root.offsetY
             width: parent.width + 2 * root.overscan
             height: parent.height + 2 * root.overscan
 
-            // Applied here, around the image rather than on it, so it composes
-            // with the centring below instead of fighting it. `Translate` cannot
-            // change the image's rendered size, which is what keeps the two
-            // layers aligned.
-            transform: Translate {
-                x: root.offsetX
-                y: root.offsetY
+            Behavior on x {
+                enabled: root.initialized
+                NumberAnimation {
+                    duration: root.motionDuration
+                    easing.type: Easing.OutCubic
+                }
+            }
+
+            Behavior on y {
+                enabled: root.initialized
+                NumberAnimation {
+                    duration: root.motionDuration
+                    easing.type: Easing.OutCubic
+                }
             }
 
             // The image is emitted at the wallpaper's own resolution and aspect
@@ -220,23 +239,26 @@ PanelWindow {
             Image {
                 id: backdrop
 
-                // Sized to the VIEWPORT, not to the enlarged box — see the note
-                // on `container`. Centring it in the box keeps it on screen at
-                // rest and aligned with DepthForeground's copy.
-                width: parent.width - 2 * root.overscan
-                height: parent.height - 2 * root.overscan
-                anchors.centerIn: parent
-
+                anchors.fill: parent
                 source: root.backgroundPath !== "" ? "file://" + root.backgroundPath : ""
                 fillMode: Image.PreserveAspectCrop
-                // The cache is keyed by URL, and a regenerated image keeps the
-                // same URL, so a changed file would be served from the old
-                // texture. The daemon gives every generation a distinct path, but
-                // disabling the cache also avoids holding two full-resolution
-                // textures per output.
-                cache: false
+                sourceSize: Qt.size(
+                    Math.max(1, Math.round(container.width * root.dpr)),
+                    Math.max(1, Math.round(container.height * root.dpr)))
+                cache: true
                 asynchronous: true
+                retainWhileLoading: true
                 smooth: true
+
+                property bool hasLoaded: false
+                onStatusChanged: {
+                    if (status === Image.Ready)
+                        hasLoaded = true;
+                }
+                opacity: hasLoaded ? 1.0 : 0.0
+                Behavior on opacity {
+                    NumberAnimation { duration: 150 }
+                }
             }
 
             // Matching DMS's own overview blur exactly, so the shared backdrop
@@ -267,4 +289,6 @@ PanelWindow {
             }
         }
     }
+
+    Component.onCompleted: initialized = true
 }

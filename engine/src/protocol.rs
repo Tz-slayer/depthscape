@@ -8,7 +8,7 @@
 //! JavaScript, so the Rust naming lint is deliberately waived.
 #![allow(non_snake_case)]
 
-use crate::config::Paths;
+use crate::config::{self, ModelDescriptor, Paths};
 use crate::model::{self, ModelState};
 use crate::pipeline::AnalyzeOutcome;
 use serde::Serialize;
@@ -17,12 +17,23 @@ use serde::Serialize;
 pub struct StatusReport {
     pub ready: bool,
     pub model: ModelInfo,
+    pub availableModels: Vec<ModelOption>,
     pub cache: CacheInfo,
     pub dataDir: String,
 }
 
 #[derive(Serialize)]
+pub struct ModelOption {
+    pub id: String,
+    pub name: String,
+    pub size: u64,
+    pub ready: bool,
+}
+
+#[derive(Serialize)]
 pub struct ModelInfo {
+    pub id: String,
+    pub name: String,
     pub ready: bool,
     pub revision: String,
     pub sha256: String,
@@ -79,17 +90,33 @@ pub struct ClearReport {
     pub removed: usize,
 }
 
-pub fn status(paths: &Paths) -> anyhow::Result<StatusReport> {
-    let state = model::state(paths)?;
+pub fn status(paths: &Paths, descriptor: &ModelDescriptor) -> anyhow::Result<StatusReport> {
+    let state = model::state(paths, descriptor)?;
+    let mut available_models = Vec::new();
+    for m in config::ALL_MODELS {
+        let m_ready = model::state(paths, m)
+            .map(|s| s == ModelState::Ready)
+            .unwrap_or(false);
+        available_models.push(ModelOption {
+            id: m.id.to_string(),
+            name: m.name.to_string(),
+            size: m.size,
+            ready: m_ready,
+        });
+    }
+
     Ok(StatusReport {
         ready: state == ModelState::Ready,
         model: ModelInfo {
+            id: descriptor.id.to_string(),
+            name: descriptor.name.to_string(),
             ready: state == ModelState::Ready,
-            revision: crate::config::MODEL_REVISION.to_string(),
-            sha256: crate::config::MODEL_SHA256.to_string(),
-            size: crate::config::MODEL_SIZE,
-            path: paths.model().display().to_string(),
+            revision: config::MODEL_REVISION.to_string(),
+            sha256: descriptor.sha256.to_string(),
+            size: descriptor.size,
+            path: paths.model_for(descriptor).display().to_string(),
         },
+        availableModels: available_models,
         cache: CacheInfo {
             depthEntries: count_files(&paths.depth_cache()),
             refinedEntries: count_files(&paths.refined_cache()),
@@ -99,16 +126,18 @@ pub fn status(paths: &Paths) -> anyhow::Result<StatusReport> {
     })
 }
 
-pub fn setup(paths: &Paths, downloaded: bool) -> anyhow::Result<SetupReport> {
+pub fn setup(paths: &Paths, descriptor: &ModelDescriptor, downloaded: bool) -> anyhow::Result<SetupReport> {
     Ok(SetupReport {
         ready: true,
         downloaded,
         model: ModelInfo {
+            id: descriptor.id.to_string(),
+            name: descriptor.name.to_string(),
             ready: true,
-            revision: crate::config::MODEL_REVISION.to_string(),
-            sha256: crate::config::MODEL_SHA256.to_string(),
-            size: crate::config::MODEL_SIZE,
-            path: paths.model().display().to_string(),
+            revision: config::MODEL_REVISION.to_string(),
+            sha256: descriptor.sha256.to_string(),
+            size: descriptor.size,
+            path: paths.model_for(descriptor).display().to_string(),
         },
     })
 }

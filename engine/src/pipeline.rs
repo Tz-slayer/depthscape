@@ -24,6 +24,7 @@ pub struct AnalyzeRequest {
     pub threshold: f32,
     /// Symmetric transition half-width in `0.0..=0.5`.
     pub feather: f32,
+    pub model: &'static crate::config::ModelDescriptor,
 }
 
 #[derive(Debug, Clone)]
@@ -108,8 +109,10 @@ pub fn analyze(paths: &Paths, request: &AnalyzeRequest) -> Result<AnalyzeOutcome
             request.wallpaper.display()
         );
     }
-    if model::state(paths)? != model::ModelState::Ready {
-        bail!("model is missing or failed verification; run `setup` first");
+    if model::state(paths, request.model)? != model::ModelState::Ready {
+        // Auto-download when missing!
+        model::download(paths, request.model)
+            .with_context(|| format!("auto-download failed for model {}", request.model.id))?;
     }
 
     let (threshold, feather) = sanitise(request.threshold, request.feather);
@@ -120,21 +123,33 @@ pub fn analyze(paths: &Paths, request: &AnalyzeRequest) -> Result<AnalyzeOutcome
 
     let stage = Instant::now();
     let wallpaper_hash = cache::hash_file(&request.wallpaper)?;
-    let entry = CacheEntry::resolve(paths, &wallpaper_hash, threshold, feather);
+    let entry = CacheEntry::resolve_with_fingerprint(
+        paths,
+        &wallpaper_hash,
+        request.model.fingerprint,
+        threshold,
+        feather,
+    );
     timings.hash_ms = stage.elapsed().as_millis();
 
     // Dimensions come from the file header alone. A full decode of a 5K
     // wallpaper costs ~60 ms, and only the pixel-level tiers below need it —
     // which is exactly when no mask is cached.
-    let stage = Instant::now();
-    let (source_width, source_height) = image::image_dimensions(&request.wallpaper)
+    let (source_width, source_height) = image::ImageReader::open(&request.wallpaper)
+        .with_context(|| format!("cannot open {}", request.wallpaper.display()))?
+        .with_guessed_format()
+        .with_context(|| format!("cannot identify format of {}", request.wallpaper.display()))?
+        .into_dimensions()
         .with_context(|| format!("cannot read {}", request.wallpaper.display()))?;
     if source_width == 0 || source_height == 0 {
         bail!("wallpaper has invalid dimensions");
     }
     timings.decode_ms = stage.elapsed().as_millis();
 
-    let (model_width, model_height) = imageops::inference_size(source_width, source_height);
+    let (model_width, model_height) = match request.model.kind {
+        crate::config::ModelKind::DepthAnything => imageops::inference_size(source_width, source_height),
+        crate::config::ModelKind::BiRefNet => (crate::config::BIREFNET_INPUT_SIZE, crate::config::BIREFNET_INPUT_SIZE),
+    };
     let (output_width, output_height) = refinement_size(source_width, source_height);
     let (refine_width, refine_height) = refine_size(output_width, output_height);
 
@@ -168,7 +183,7 @@ pub fn analyze(paths: &Paths, request: &AnalyzeRequest) -> Result<AnalyzeOutcome
                     model_height,
                     image::imageops::FilterType::Triangle,
                 );
-                let mut depth_model = DepthModel::load(&model::model_path(paths))?;
+                let mut depth_model = DepthModel::load(&model::model_path(paths, request.model), request.model.kind)?;
                 let predicted = depth_model.infer(resized.as_raw(), model_width, model_height)?;
                 cache::atomic_write(
                     &entry.depth_path,
@@ -454,7 +469,11 @@ fn ensure_source<'a>(
 ) -> Result<&'a RgbImage> {
     if slot.is_none() {
         let stage = Instant::now();
-        let decoded = image::open(wallpaper)
+        let decoded = image::ImageReader::open(wallpaper)
+            .with_context(|| format!("cannot open {}", wallpaper.display()))?
+            .with_guessed_format()
+            .with_context(|| format!("cannot identify format of {}", wallpaper.display()))?
+            .decode()
             .with_context(|| format!("cannot decode {}", wallpaper.display()))?;
         *slot = Some(decoded.to_rgb8());
         timings.decode_ms += stage.elapsed().as_millis();

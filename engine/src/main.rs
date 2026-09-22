@@ -35,10 +35,18 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Report model and cache state.
-    Status,
+    Status {
+        /// Model ID to query (e.g. small, base, large). Defaults to small.
+        #[arg(long, default_value = "small")]
+        model: String,
+    },
 
     /// Download and verify the model if it is not already present.
     Setup {
+        /// Model ID to set up (e.g. small, base, large). Defaults to small.
+        #[arg(long, default_value = "small")]
+        model: String,
+
         /// Re-download even when a verified model is already installed.
         #[arg(long)]
         force: bool,
@@ -57,6 +65,10 @@ enum Command {
         /// Symmetric transition half-width, 0.0-0.5.
         #[arg(long, default_value_t = 0.08)]
         feather: f32,
+
+        /// Model ID to use (e.g. small, base, large). Defaults to small.
+        #[arg(long, default_value = "small")]
+        model: String,
     },
 
     /// Delete every cached depth map, refined field, and split pair.
@@ -71,32 +83,46 @@ fn main() -> Result<()> {
     };
     let paths = Paths::new(root);
 
+    let model_err = |m: &str| {
+        let available = config::ALL_MODELS
+            .iter()
+            .map(|desc| desc.id)
+            .collect::<Vec<_>>()
+            .join(", ");
+        anyhow::anyhow!("unknown model '{m}'; available: {available}")
+    };
+
     match cli.command {
-        Command::Status => {
-            emit(&protocol::status(&paths)?)?;
+        Command::Status { model } => {
+            let descriptor = config::find_model(&model).ok_or_else(|| model_err(&model))?;
+            emit(&protocol::status(&paths, descriptor)?)?;
         }
-        Command::Setup { force } => {
+        Command::Setup { model, force } => {
+            let descriptor = config::find_model(&model).ok_or_else(|| model_err(&model))?;
             paths.ensure()?;
-            let already_ready = model::state(&paths)? == model::ModelState::Ready;
+            let already_ready = model::state(&paths, descriptor)? == model::ModelState::Ready;
             if force || !already_ready {
-                model::download(&paths)?;
+                model::download(&paths, descriptor)?;
             }
-            if model::state(&paths)? != model::ModelState::Ready {
-                bail!("model is still not usable after setup");
+            if model::state(&paths, descriptor)? != model::ModelState::Ready {
+                bail!("model {} is still not usable after setup", descriptor.id);
             }
-            emit(&protocol::setup(&paths, force || !already_ready)?)?;
+            emit(&protocol::setup(&paths, descriptor, force || !already_ready)?)?;
         }
         Command::Analyze {
             wallpaper,
             threshold,
             feather,
+            model,
         } => {
+            let descriptor = config::find_model(&model).ok_or_else(|| model_err(&model))?;
             let request = pipeline::AnalyzeRequest {
                 wallpaper: wallpaper
                     .canonicalize()
                     .with_context(|| format!("cannot resolve {}", wallpaper.display()))?,
                 threshold,
                 feather,
+                model: descriptor,
             };
             let outcome = pipeline::analyze(&paths, &request)?;
             emit(&protocol::AnalyzeReport::from(outcome))?;

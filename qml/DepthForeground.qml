@@ -35,10 +35,17 @@ PanelWindow {
 
     property string foregroundPath: ""
 
-    /// Parallax offset in output logical pixels. The two layers move by
-    /// *different* amounts — see the LAYERING note below for why.
+    /// Parallax offset in output logical pixels. The background receives exactly
+    /// this value, not a fraction of it — see DepthDaemon.qml and DepthBackground.qml for why.
     property real offsetX: 0
     property real offsetY: 0
+    property int motionDuration: 240
+    property bool initialized: false
+
+    /// Spare area this surface must carry on every side, in output logical
+    /// pixels. The same value the background gets, so the two canvases are the
+    /// same size and crop identically.
+    property real reserve: 0
 
     /// Opacity of the whole surface, driven by DepthDaemon so that all three
     /// fade together while the overview is open. Deliberately the same value the
@@ -48,6 +55,13 @@ PanelWindow {
     property real overviewOpacity: 1
 
     readonly property bool active: foregroundPath !== ""
+    readonly property real dpr: (targetScreen && targetScreen.devicePixelRatio) ? targetScreen.devicePixelRatio : 1
+
+    /// Overscan in logical pixels — byte-for-byte the same expression
+    /// DepthBackground uses. The two surfaces have to lay out an identical
+    /// rectangle or `PreserveAspectCrop` crops them differently and the subject
+    /// no longer lines up with the hole it was cut from.
+    readonly property real overscan: root.reserve > 0 ? Math.ceil(root.reserve) + 8 : 0
 
     screen: root.targetScreen
     visible: root.active
@@ -71,21 +85,6 @@ PanelWindow {
     // not swallow clicks meant for the widgets or the desktop beneath it.
     mask: Region {}
 
-    // NO SPARE AREA HERE, AND THAT IS DELIBERATE.
-    //
-    // The background layer carries an overscan because behind *it* there is
-    // nothing but the compositor's flat colour. This layer is different: behind
-    // it is DepthBackground, opaque and already covering the whole viewport.
-    // Where the subject moves away from, the background is exposed — and that is
-    // precisely the intended effect, the near scenery sliding aside to reveal
-    // what was behind it. There is no gap to fill because the layer below is
-    // opaque, so an overscan here would only add texture to decode.
-    //
-    // The offset is a `Translate` and not a `x`/`y` on the Image, for the same
-    // reason as the background: a translation cannot change the rendered size,
-    // so this copy stays pixel-for-pixel registered with DepthBackground's while
-    // both move.
-    //
     // The wrapper also carries the overview fade. `PanelWindow` is a Wayland
     // surface and has no `opacity` of its own — assigning one is a startup
     // error — so the fade has to live on a content root like this one. Same
@@ -98,24 +97,77 @@ PanelWindow {
         anchors.fill: parent
         opacity: root.overviewOpacity
 
-        transform: Translate {
-            x: root.offsetX
-            y: root.offsetY
-        }
+        // THIS LAYER HAS SPARE AREA TOO, and leaving it out was a bug.
+        //
+        // The earlier note here argued that no overscan was needed because the
+        // background underneath is opaque, so wherever the subject slides away
+        // from, the background simply shows through. That held while the two
+        // layers moved by different amounts, because what showed through was the
+        // far plane and reading it as depth was the point. It does not hold now
+        // that they move together: this image's own border slides into the
+        // viewport and cuts a straight edge across the subject, while the hole
+        // the subject belongs in keeps going underneath it.
+        //
+        // The canvas is oversized and the image fills *that*, not the viewport.
+        // Oversizing the box while keeping the image at viewport size — which is
+        // what the background did — is what leaves a stripe of bare colour at
+        // the edge on every shift: the box moves, the image inside it is no
+        // wider than the screen was, and the gap between them comes on screen.
+        //
+        // It is a container size rather than a `scale` on the image for the
+        // reason DepthBackground spells out: scaling resamples about the image's
+        // own centre and displaces a static scene by `size × eps / 2`, which is
+        // larger than the travel being reserved for.
+        Item {
+            id: container
 
-        // Must scale identically to DepthBackground's Image, or the subject
-        // drifts away from the hole it was cut out of. Both use
-        // PreserveAspectCrop and both fill the same viewport rect, so they agree
-        // by construction.
-        Image {
-            anchors.fill: parent
-            source: root.foregroundPath !== "" ? "file://" + root.foregroundPath : ""
-            fillMode: Image.PreserveAspectCrop
-            // Same reasoning as the background: the URL is stable across
-            // regenerations and these are full-screen RGBA textures.
-            cache: false
-            asynchronous: true
-            smooth: true
+            x: -root.overscan + root.offsetX
+            y: -root.overscan + root.offsetY
+            width: parent.width + 2 * root.overscan
+            height: parent.height + 2 * root.overscan
+
+            Behavior on x {
+                enabled: root.initialized
+                NumberAnimation {
+                    duration: root.motionDuration
+                    easing.type: Easing.OutCubic
+                }
+            }
+
+            Behavior on y {
+                enabled: root.initialized
+                NumberAnimation {
+                    duration: root.motionDuration
+                    easing.type: Easing.OutCubic
+                }
+            }
+
+            Image {
+                id: cutout
+
+                anchors.fill: parent
+                source: root.foregroundPath !== "" ? "file://" + root.foregroundPath : ""
+                fillMode: Image.PreserveAspectCrop
+                sourceSize: Qt.size(
+                    Math.max(1, Math.round(container.width * root.dpr)),
+                    Math.max(1, Math.round(container.height * root.dpr)))
+                cache: true
+                asynchronous: true
+                retainWhileLoading: true
+                smooth: true
+
+                property bool hasLoaded: false
+                onStatusChanged: {
+                    if (status === Image.Ready)
+                        hasLoaded = true;
+                }
+                opacity: hasLoaded ? 1.0 : 0.0
+                Behavior on opacity {
+                    NumberAnimation { duration: 150 }
+                }
+            }
         }
     }
+
+    Component.onCompleted: initialized = true
 }
