@@ -147,7 +147,9 @@ pub fn analyze(paths: &Paths, request: &AnalyzeRequest) -> Result<AnalyzeOutcome
     timings.decode_ms = stage.elapsed().as_millis();
 
     let (model_width, model_height) = match request.model.kind {
-        crate::config::ModelKind::DepthAnything => imageops::inference_size(source_width, source_height),
+        crate::config::ModelKind::DepthAnything | crate::config::ModelKind::DepthAnythingV3 => {
+            imageops::inference_size(source_width, source_height)
+        }
         crate::config::ModelKind::BiRefNet => (crate::config::BIREFNET_INPUT_SIZE, crate::config::BIREFNET_INPUT_SIZE),
     };
     let (output_width, output_height) = refinement_size(source_width, source_height);

@@ -52,35 +52,72 @@ impl DepthModel {
             );
         }
 
-        let tensor = Array4::from_shape_vec(
-            (1, 3, height as usize, width as usize),
-            to_normalised_chw(rgb, width, height),
-        )
-        .context("cannot build the input tensor")?;
-
-        let input = TensorRef::from_array_view(&tensor)
-            .map_err(|error| anyhow::anyhow!("cannot wrap the input tensor: {error}"))?;
-        let outputs = self
-            .session
-            .run(ort::inputs![input])
-            .map_err(|error| anyhow::anyhow!("inference failed: {error}"))?;
-
-        let output = outputs[0]
-            .try_extract_array::<f32>()
-            .map_err(|error| anyhow::anyhow!("model output is not an f32 tensor: {error}"))?;
-        let data: Vec<f32> = output.iter().copied().collect();
-
         let pixels = (width as usize) * (height as usize);
-        if data.len() != pixels {
-            bail!(
-                "model returned {} values, expected {pixels} for {width}x{height}",
-                data.len()
-            );
-        }
-
         match self.kind {
-            ModelKind::DepthAnything => Ok(normalise(&data)),
-            ModelKind::BiRefNet => Ok(sigmoid_mask(&data)),
+            ModelKind::DepthAnything | ModelKind::DepthAnythingV3 => {
+                let tensor = if self.kind == ModelKind::DepthAnythingV3 {
+                    // Depth Anything V3 expects 5D tensor: [batch, num_views, channels, height, width]
+                    ndarray::Array5::from_shape_vec(
+                        (1, 1, 3, height as usize, width as usize),
+                        to_normalised_chw(rgb, width, height),
+                    )
+                    .context("cannot build 5D input tensor")?
+                    .into_dyn()
+                } else {
+                    // Depth Anything V2 expects 4D tensor: [batch, channels, height, width]
+                    Array4::from_shape_vec(
+                        (1, 3, height as usize, width as usize),
+                        to_normalised_chw(rgb, width, height),
+                    )
+                    .context("cannot build 4D input tensor")?
+                    .into_dyn()
+                };
+
+                let input = TensorRef::from_array_view(&tensor)
+                    .map_err(|error| anyhow::anyhow!("cannot wrap the input tensor: {error}"))?;
+                let outputs = self
+                    .session
+                    .run(ort::inputs![input])
+                    .map_err(|error| anyhow::anyhow!("inference failed: {error}"))?;
+
+                let output = outputs[0]
+                    .try_extract_array::<f32>()
+                    .map_err(|error| anyhow::anyhow!("model output is not an f32 tensor: {error}"))?;
+                let data: Vec<f32> = output.iter().copied().collect();
+                if data.len() != pixels {
+                    bail!(
+                        "model returned {} values, expected {pixels} for {width}x{height}",
+                        data.len()
+                    );
+                }
+                Ok(normalise(&data))
+            }
+            ModelKind::BiRefNet => {
+                let tensor = Array4::from_shape_vec(
+                    (1, 3, height as usize, width as usize),
+                    to_normalised_chw(rgb, width, height),
+                )
+                .context("cannot build the input tensor")?;
+
+                let input = TensorRef::from_array_view(&tensor)
+                    .map_err(|error| anyhow::anyhow!("cannot wrap the input tensor: {error}"))?;
+                let outputs = self
+                    .session
+                    .run(ort::inputs![input])
+                    .map_err(|error| anyhow::anyhow!("inference failed: {error}"))?;
+
+                let output = outputs[0]
+                    .try_extract_array::<f32>()
+                    .map_err(|error| anyhow::anyhow!("model output is not an f32 tensor: {error}"))?;
+                let data: Vec<f32> = output.iter().copied().collect();
+                if data.len() != pixels {
+                    bail!(
+                        "model returned {} values, expected {pixels} for {width}x{height}",
+                        data.len()
+                    );
+                }
+                Ok(sigmoid_mask(&data))
+            }
         }
     }
 }
@@ -200,6 +237,29 @@ mod tests {
         let mut model = DepthModel::load(&path, crate::config::ModelKind::BiRefNet).unwrap();
         let result = model.infer(&dummy_rgb, 1024, 1024).unwrap();
         assert_eq!(result.len(), 1024 * 1024);
+        for &v in &result {
+            assert!((0.0..=1.0).contains(&v));
+        }
+    }
+
+    #[test]
+    fn da3_session_inspection() {
+        let home = match std::env::var("HOME") {
+            Ok(val) => val,
+            Err(_) => return,
+        };
+        let path = std::path::PathBuf::from(home).join(".local/share/depthscape/models/depth-anything-v3-small/model.onnx");
+        if !path.exists() {
+            return;
+        }
+        let session = Session::builder().unwrap().commit_from_file(&path).unwrap();
+        assert_eq!(session.inputs().len(), 1);
+        assert_eq!(session.outputs().len(), 4);
+
+        let dummy_rgb = vec![128u8; 518 * 294 * 3];
+        let mut model = DepthModel::load(&path, crate::config::ModelKind::DepthAnythingV3).unwrap();
+        let result = model.infer(&dummy_rgb, 518, 294).unwrap();
+        assert_eq!(result.len(), 518 * 294);
         for &v in &result {
             assert!((0.0..=1.0).contains(&v));
         }

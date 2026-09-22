@@ -100,7 +100,7 @@ pub fn status(paths: &Paths, descriptor: &ModelDescriptor) -> anyhow::Result<Sta
         available_models.push(ModelOption {
             id: m.id.to_string(),
             name: m.name.to_string(),
-            size: m.size,
+            size: m.total_size(),
             ready: m_ready,
         });
     }
@@ -113,7 +113,7 @@ pub fn status(paths: &Paths, descriptor: &ModelDescriptor) -> anyhow::Result<Sta
             ready: state == ModelState::Ready,
             revision: config::MODEL_REVISION.to_string(),
             sha256: descriptor.sha256.to_string(),
-            size: descriptor.size,
+            size: descriptor.total_size(),
             path: paths.model_for(descriptor).display().to_string(),
         },
         availableModels: available_models,
@@ -136,7 +136,7 @@ pub fn setup(paths: &Paths, descriptor: &ModelDescriptor, downloaded: bool) -> a
             ready: true,
             revision: config::MODEL_REVISION.to_string(),
             sha256: descriptor.sha256.to_string(),
-            size: descriptor.size,
+            size: descriptor.total_size(),
             path: paths.model_for(descriptor).display().to_string(),
         },
     })

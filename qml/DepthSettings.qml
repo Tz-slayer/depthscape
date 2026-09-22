@@ -39,6 +39,7 @@ PluginSettings {
     readonly property bool overviewActive: fadeInOverviewSetting.value
 
     readonly property bool isBiRefNet: (modelTypeSetting.value || "").indexOf("birefnet") !== -1
+    readonly property bool isDepthAnythingV3: (modelTypeSetting.value || "").indexOf("v3") !== -1
 
     function isModelReady(modelId) {
         if (!root.daemon || !root.daemon.availableModels)
@@ -195,9 +196,12 @@ PluginSettings {
             id: modelTypeSetting
             settingKey: "modelType"
             label: I18n.tr("Model Architecture & Variant")
-            description: I18n.tr("Choose between Monocular Depth Estimation (Depth Anything V2) and Salient Subject Segmentation (BiRefNet). Models auto-download on first use.")
+            description: I18n.tr("Choose between Monocular Depth Estimation (Depth Anything V3/V2) and Salient Subject Segmentation (BiRefNet). Models auto-download on first use.")
             defaultValue: "small"
             options: [
+                { label: I18n.tr("Depth Anything V3 Small (~105 MB, Fast, Recommended)"), value: "v3-small" },
+                { label: I18n.tr("Depth Anything V3 Base (~413 MB, Balanced)"), value: "v3-base" },
+                { label: I18n.tr("Depth Anything V3 Large (~1.38 GB, High Quality)"), value: "v3-large" },
                 { label: I18n.tr("Depth Anything V2 Small (~99 MB, Fast)"), value: "small" },
                 { label: I18n.tr("Depth Anything V2 Base (~389 MB, Balanced)"), value: "base" },
                 { label: I18n.tr("Depth Anything V2 Large (~1.34 GB, High Quality)"), value: "large" },
@@ -211,6 +215,8 @@ PluginSettings {
             label: I18n.tr("Active Architecture")
             description: root.isBiRefNet
                 ? I18n.tr("BiRefNet (Bilateral Reference Network) specializes in salient object and character segmentation. It outputs high-resolution foreground masks, making it ideal for portraits, anime, and sharp character cutout.")
+                : root.isDepthAnythingV3
+                ? I18n.tr("Depth Anything V3 is the latest foundation model with unified depth-ray ViT geometry, offering enhanced depth boundary accuracy and spatial consistency across complex scenes.")
                 : I18n.tr("Depth Anything V2 is a foundation model for monocular depth estimation. It estimates continuous 3D relative scene depth across the entire wallpaper.")
             showReset: false
 
@@ -220,8 +226,14 @@ PluginSettings {
                 emphasized: true
                 text: root.isBiRefNet
                     ? I18n.tr("Salient Subject Segmentation (BiRefNet)")
-                    : I18n.tr("Relative Depth Estimation (Depth Anything)")
-                detail: root.isBiRefNet ? I18n.tr("1024×1024 Mask Logits") : I18n.tr("Dynamic ViT Depth Map")
+                    : root.isDepthAnythingV3
+                    ? I18n.tr("Depth-Ray Estimation (Depth Anything V3)")
+                    : I18n.tr("Relative Depth Estimation (Depth Anything V2)")
+                detail: root.isBiRefNet
+                    ? I18n.tr("1024×1024 Mask Logits")
+                    : root.isDepthAnythingV3
+                    ? I18n.tr("Unified ViT Depth-Ray")
+                    : I18n.tr("Dynamic ViT Depth Map")
             }
         }
 
@@ -392,7 +404,9 @@ PluginSettings {
                             StyledText {
                                 text: (modelData.id.indexOf("birefnet") !== -1
                                     ? I18n.tr("Salient Subject")
-                                    : I18n.tr("Depth Estimation"))
+                                    : modelData.id.indexOf("v3") !== -1
+                                    ? I18n.tr("Depth Anything V3")
+                                    : I18n.tr("Depth Anything V2"))
                                     + " • " + root.formatBytes(modelData.size)
                                 font.pixelSize: Theme.fontSizeExtraSmall
                                 color: Theme.surfaceVariantText

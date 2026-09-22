@@ -12,7 +12,16 @@ pub const MODEL_REVISION: &str = "main";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelKind {
     DepthAnything,
+    DepthAnythingV3,
     BiRefNet,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtraFile {
+    pub filename: &'static str,
+    pub url: &'static str,
+    pub size: u64,
+    pub sha256: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,7 +35,68 @@ pub struct ModelDescriptor {
     pub url: &'static str,
     pub directory: &'static str,
     pub filename: &'static str,
+    pub extra_file: Option<ExtraFile>,
 }
+
+impl ModelDescriptor {
+    pub fn total_size(&self) -> u64 {
+        self.size + self.extra_file.map(|e| e.size).unwrap_or(0)
+    }
+}
+
+pub const MODEL_V3_SMALL: ModelDescriptor = ModelDescriptor {
+    id: "v3-small",
+    name: "Depth Anything V3 Small (105MB)",
+    kind: ModelKind::DepthAnythingV3,
+    size: 640_691,
+    sha256: "396008798244a074297fd88e450433b1357fc687f534939375c804ded86e7b2a",
+    fingerprint: "396008798244a074",
+    url: "https://huggingface.co/onnx-community/depth-anything-v3-small/resolve/main/onnx/model.onnx?download=true",
+    directory: "models/depth-anything-v3-small",
+    filename: "model.onnx",
+    extra_file: Some(ExtraFile {
+        filename: "model.onnx_data",
+        url: "https://huggingface.co/onnx-community/depth-anything-v3-small/resolve/main/onnx/model.onnx_data?download=true",
+        size: 104_702_464,
+        sha256: "802bb24741e67f5bb2b369fc64d40afe11439cc895d676d658d65cfb75c9860f",
+    }),
+};
+
+pub const MODEL_V3_BASE: ModelDescriptor = ModelDescriptor {
+    id: "v3-base",
+    name: "Depth Anything V3 Base (413MB)",
+    kind: ModelKind::DepthAnythingV3,
+    size: 646_912,
+    sha256: "d9e7775d8b0340ce9416cfdb4356651ef72abab75eb1485f0aeefa352d78255c",
+    fingerprint: "d9e7775d8b0340ce",
+    url: "https://huggingface.co/onnx-community/depth-anything-v3-base/resolve/main/onnx/model.onnx?download=true",
+    directory: "models/depth-anything-v3-base",
+    filename: "model.onnx",
+    extra_file: Some(ExtraFile {
+        filename: "model.onnx_data",
+        url: "https://huggingface.co/onnx-community/depth-anything-v3-base/resolve/main/onnx/model.onnx_data?download=true",
+        size: 412_068_352,
+        sha256: "09de4dcff3fefe48b04fedbf146151f3339e6115416a72bf9b36dee3aafd03bd",
+    }),
+};
+
+pub const MODEL_V3_LARGE: ModelDescriptor = ModelDescriptor {
+    id: "v3-large",
+    name: "Depth Anything V3 Large (1.38GB)",
+    kind: ModelKind::DepthAnythingV3,
+    size: 1_093_118,
+    sha256: "2c02d70b301b4b51c357e7f04c371e27b5d4a5520a0ef11b8c657627e86b4a7e",
+    fingerprint: "2c02d70b301b4b51",
+    url: "https://huggingface.co/onnx-community/depth-anything-v3-large/resolve/main/onnx/model.onnx?download=true",
+    directory: "models/depth-anything-v3-large",
+    filename: "model.onnx",
+    extra_file: Some(ExtraFile {
+        filename: "model.onnx_data",
+        url: "https://huggingface.co/onnx-community/depth-anything-v3-large/resolve/main/onnx/model.onnx_data?download=true",
+        size: 1_381_741_568,
+        sha256: "3aee647d45b208cbff14f4a738737a4bd9f9e5fbce2c48e7a6db311ea807060c",
+    }),
+};
 
 pub const MODEL_SMALL: ModelDescriptor = ModelDescriptor {
     id: "small",
@@ -38,6 +108,7 @@ pub const MODEL_SMALL: ModelDescriptor = ModelDescriptor {
     url: "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model.onnx?download=true",
     directory: "models/depth-anything-v2-small",
     filename: "model.onnx",
+    extra_file: None,
 };
 
 pub const MODEL_BASE: ModelDescriptor = ModelDescriptor {
@@ -50,6 +121,7 @@ pub const MODEL_BASE: ModelDescriptor = ModelDescriptor {
     url: "https://huggingface.co/onnx-community/depth-anything-v2-base/resolve/main/onnx/model.onnx?download=true",
     directory: "models/depth-anything-v2-base",
     filename: "model.onnx",
+    extra_file: None,
 };
 
 pub const MODEL_LARGE: ModelDescriptor = ModelDescriptor {
@@ -62,6 +134,7 @@ pub const MODEL_LARGE: ModelDescriptor = ModelDescriptor {
     url: "https://huggingface.co/onnx-community/depth-anything-v2-large/resolve/main/onnx/model.onnx?download=true",
     directory: "models/depth-anything-v2-large",
     filename: "model.onnx",
+    extra_file: None,
 };
 
 pub const MODEL_BIREFNET_LITE: ModelDescriptor = ModelDescriptor {
@@ -74,6 +147,7 @@ pub const MODEL_BIREFNET_LITE: ModelDescriptor = ModelDescriptor {
     url: "https://huggingface.co/onnx-community/BiRefNet_lite-ONNX/resolve/main/onnx/model.onnx?download=true",
     directory: "models/birefnet-lite",
     filename: "model.onnx",
+    extra_file: None,
 };
 
 pub const MODEL_BIREFNET: ModelDescriptor = ModelDescriptor {
@@ -86,9 +160,13 @@ pub const MODEL_BIREFNET: ModelDescriptor = ModelDescriptor {
     url: "https://huggingface.co/onnx-community/BiRefNet-ONNX/resolve/main/onnx/model.onnx?download=true",
     directory: "models/birefnet",
     filename: "model.onnx",
+    extra_file: None,
 };
 
 pub const ALL_MODELS: &[ModelDescriptor] = &[
+    MODEL_V3_SMALL,
+    MODEL_V3_BASE,
+    MODEL_V3_LARGE,
     MODEL_SMALL,
     MODEL_BASE,
     MODEL_LARGE,
@@ -101,6 +179,9 @@ pub fn default_model() -> &'static ModelDescriptor {
 }
 
 pub fn find_model(id: &str) -> Option<&'static ModelDescriptor> {
+    if id.eq_ignore_ascii_case("v3") {
+        return Some(&MODEL_V3_SMALL);
+    }
     ALL_MODELS.iter().find(|m| m.id.eq_ignore_ascii_case(id))
 }
 

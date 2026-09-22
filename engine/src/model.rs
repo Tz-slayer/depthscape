@@ -42,7 +42,23 @@ pub fn verify(path: &Path, descriptor: &ModelDescriptor) -> Result<bool> {
     if metadata.len() != descriptor.size {
         return Ok(false);
     }
-    Ok(sha256_file(path)? == descriptor.sha256)
+    if sha256_file(path)? != descriptor.sha256 {
+        return Ok(false);
+    }
+    if let Some(extra) = descriptor.extra_file {
+        let extra_path = path.with_file_name(extra.filename);
+        if !extra_path.is_file() {
+            return Ok(false);
+        }
+        let extra_meta = fs::metadata(&extra_path)?;
+        if extra_meta.len() != extra.size {
+            return Ok(false);
+        }
+        if sha256_file(&extra_path)? != extra.sha256 {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Sidecar recording the last successful verification.
@@ -100,6 +116,15 @@ pub fn verify_cached(path: &Path, descriptor: &ModelDescriptor) -> Result<bool> 
     if size != descriptor.size {
         return Ok(false);
     }
+    if let Some(extra) = descriptor.extra_file {
+        let extra_path = path.with_file_name(extra.filename);
+        let Ok(extra_meta) = fs::metadata(&extra_path) else {
+            return Ok(false);
+        };
+        if extra_meta.len() != extra.size {
+            return Ok(false);
+        }
+    }
     if memo_is_current(read_memo(path), descriptor, size, mtime) {
         return Ok(true);
     }
@@ -129,6 +154,34 @@ pub fn download(paths: &Paths, descriptor: &ModelDescriptor) -> Result<()> {
     let temporary = parent.join(format!(".{}.part", descriptor.filename));
     let _ = fs::remove_file(&temporary);
 
+    download_file(descriptor.url, &temporary, descriptor.size, descriptor.sha256)?;
+
+    let mut extra_temp = None;
+    if let Some(extra) = descriptor.extra_file {
+        let temp_extra = parent.join(format!(".{}.part", extra.filename));
+        let _ = fs::remove_file(&temp_extra);
+        download_file(extra.url, &temp_extra, extra.size, extra.sha256)?;
+        extra_temp = Some((temp_extra, parent.join(extra.filename)));
+    }
+
+    fs::rename(&temporary, &destination).with_context(|| {
+        format!("cannot move the verified model onto {}", destination.display())
+    })?;
+
+    if let Some((src, dst)) = extra_temp {
+        fs::rename(&src, &dst).with_context(|| {
+            format!("cannot move the verified extra file onto {}", dst.display())
+        })?;
+    }
+
+    // Record the verification that just happened, so the first `analyze` after
+    // setup does not immediately repeat it.
+    let metadata = fs::metadata(&destination)?;
+    write_memo(&destination, descriptor, metadata.len(), mtime_ns(&metadata))?;
+    Ok(())
+}
+
+fn download_file(url: &str, destination: &Path, expected_size: u64, expected_sha256: &str) -> Result<()> {
     let status = Command::new("curl")
         .args([
             "--fail",
@@ -139,41 +192,26 @@ pub fn download(paths: &Paths, descriptor: &ModelDescriptor) -> Result<()> {
             "3",
             "--output",
         ])
-        .arg(&temporary)
-        .arg(descriptor.url)
+        .arg(destination)
+        .arg(url)
         .status()
         .context("cannot run curl; install curl to download the model")?;
     if !status.success() {
-        let _ = fs::remove_file(&temporary);
-        bail!("model download failed with {status}");
+        let _ = fs::remove_file(destination);
+        bail!("download from {url} failed with {status}");
     }
 
-    let metadata = fs::metadata(&temporary).context("downloaded file is missing")?;
-    if metadata.len() != descriptor.size {
+    let metadata = fs::metadata(destination).context("downloaded file is missing")?;
+    if metadata.len() != expected_size {
         let actual = metadata.len();
-        let _ = fs::remove_file(&temporary);
-        bail!(
-            "model size mismatch: expected {} bytes, received {actual}",
-            descriptor.size
-        );
+        let _ = fs::remove_file(destination);
+        bail!("size mismatch for {url}: expected {expected_size} bytes, received {actual}");
     }
-    let actual = sha256_file(&temporary)?;
-    if actual != descriptor.sha256 {
-        let _ = fs::remove_file(&temporary);
-        bail!(
-            "model checksum mismatch: expected {}, received {actual}",
-            descriptor.sha256
-        );
+    let actual = sha256_file(destination)?;
+    if actual != expected_sha256 {
+        let _ = fs::remove_file(destination);
+        bail!("checksum mismatch for {url}: expected {expected_sha256}, received {actual}");
     }
-
-    fs::rename(&temporary, &destination).with_context(|| {
-        format!("cannot move the verified model onto {}", destination.display())
-    })?;
-
-    // Record the verification that just happened, so the first `analyze` after
-    // setup does not immediately repeat it.
-    let metadata = fs::metadata(&destination)?;
-    write_memo(&destination, descriptor, metadata.len(), mtime_ns(&metadata))?;
     Ok(())
 }
 
