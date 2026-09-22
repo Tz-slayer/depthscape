@@ -90,7 +90,16 @@ impl DepthModel {
                         data.len()
                     );
                 }
-                Ok(normalise(&data))
+                if self.kind == ModelKind::DepthAnythingV3 {
+                    // Depth Anything V3 outputs metric ray depth (physical distance Z),
+                    // where smaller distance is closer to camera.
+                    // Invert so that near objects have values close to 1.0, matching the
+                    // pipeline convention (near is high).
+                    let norm = normalise(&data);
+                    Ok(norm.into_iter().map(|v| 1.0 - v).collect())
+                } else {
+                    Ok(normalise(&data))
+                }
             }
             ModelKind::BiRefNet => {
                 let tensor = Array4::from_shape_vec(
