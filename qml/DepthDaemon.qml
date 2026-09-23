@@ -1453,9 +1453,9 @@ PluginComponent {
 
                     // 3. Foreground — the subject, mapped last means on top.
                     //
-                    // Same offset as the widgets and the opposite of the
-                    // background's; no slack, because what it uncovers is the
-                    // background.
+                    // Same offset as the background and different from the
+                    // stationary widgets; its oversized canvas supplies the
+                    // same slack as the background so the pair stays aligned.
                     DepthForeground {
                         targetScreen: surfaces.modelData
                         foregroundPath: surfaces.showForeground

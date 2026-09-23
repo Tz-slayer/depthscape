@@ -1,9 +1,10 @@
 # Depthscape
 
 Depth-aware wallpapers for DankMaterialShell. A local depth model splits your
-wallpaper into a subject and a background, and the subject is drawn above your
-desktop widgets — so characters and scenery occlude your clock and cards, the
-way an iOS depth-effect lock screen does.
+wallpaper into a subject and a background, and the subject is drawn above
+Depthscape's desktop widgets — so characters and scenery occlude its clock and
+cards the way an iOS depth-effect lock screen does. Ordinary application windows
+remain above the wallpaper, as they should.
 
 ![Depthscape in action](assets/screenshot.png)
 
@@ -65,8 +66,8 @@ the part worth understanding before installing it.
 The engine emits a matched pair per wallpaper: `foreground.png` (the subject,
 with coverage in the alpha channel) and `background.png` (the same scene with the
 subject's region filled in by a blurred estimate of its surroundings). Both are
-drawn on the compositor's `background` layer, with your widgets and the foreground
-sandwiched in between.
+drawn on the compositor's `background` layer, with Depthscape's widgets
+sandwiched between them.
 
 A single-mask overlay cannot produce this effect, and it is worth saying why.
 Drawing a cut-out over DMS's own wallpaper composites

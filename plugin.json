@@ -1,7 +1,7 @@
 {
     "id": "depthscape",
     "name": "Depthscape",
-    "description": "AI depth-aware wallpapers: the wallpaper is split into a background and a cut-out subject, and the subject is drawn in front of the widgets and windows above it",
+    "description": "AI depth-aware wallpapers: split a wallpaper into background and subject layers so the subject can occlude Depthscape desktop widgets while application windows remain above the scene",
     "version": "0.2.0",
     "author": "Tz-slayer",
     "repository": "https://github.com/Tz-slayer/depthscape",

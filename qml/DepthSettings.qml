@@ -139,7 +139,7 @@ PluginSettings {
             id: effectEnabledSetting
             settingKey: "effectEnabled"
             label: I18n.tr("Enable Depthscape")
-            description: I18n.tr("Split the wallpaper into depth planes and draw the foreground subject over desktop widgets and windows. Turning this off returns the wallpaper untouched.")
+            description: I18n.tr("Split the wallpaper into depth planes and draw the foreground subject over Depthscape's desktop widgets. Application windows remain above the wallpaper. Turning this off returns the wallpaper untouched.")
             defaultValue: true
         }
 
@@ -587,7 +587,7 @@ PluginSettings {
                     id: parallaxInvertedSetting
                     settingKey: "parallaxInverted"
                     label: I18n.tr("Invert Direction")
-                    description: I18n.tr("Invert the movement direction when navigating. The background always moves opposite to the foreground.")
+                    description: I18n.tr("Invert the movement direction when navigating. The foreground and background stay aligned and move together around stationary widgets.")
                     defaultValue: false
                 }
             }
@@ -685,7 +685,7 @@ PluginSettings {
         SettingRow {
             id: layoutActionRow
             label: I18n.tr("Example Layout")
-            description: I18n.tr("Writes a commented sample layout to the path above. This overwrites the existing file, so copy any edits you have made first.")
+            description: I18n.tr("Writes a sample layout to the path above only when the file does not already exist. Existing layouts are left untouched.")
             showReset: false
 
             DankButton {
