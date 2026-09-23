@@ -177,12 +177,16 @@ fn normalise(values: &[f32]) -> Vec<f32> {
     if !minimum.is_finite() || !maximum.is_finite() || maximum <= minimum {
         return vec![0.5; values.len()];
     }
-    let span = maximum - minimum;
+    // Calculate the span in f64. Two perfectly finite f32 endpoints can be far
+    // enough apart for their f32 subtraction to overflow to infinity, which
+    // would turn the maximum sample into `infinity / infinity == NaN`.
+    let minimum64 = minimum as f64;
+    let span = maximum as f64 - minimum64;
     values
         .iter()
         .map(|value| {
             if value.is_finite() {
-                ((value - minimum) / span).clamp(0.0, 1.0)
+                (((*value as f64 - minimum64) / span).clamp(0.0, 1.0)) as f32
             } else {
                 0.5
             }

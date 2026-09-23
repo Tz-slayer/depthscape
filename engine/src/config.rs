@@ -200,7 +200,10 @@ pub const PATCH_SIZE: u32 = 14;
 pub const BIREFNET_INPUT_SIZE: u32 = 1024;
 
 /// Bump when the depth post-processing changes (invalidates depth + refined).
-pub const DEPTH_PIPELINE_VERSION: u32 = 1;
+///
+/// v2: non-finite model samples are replaced with neutral mid-depth values and
+/// extreme finite ranges are normalised without overflowing.
+pub const DEPTH_PIPELINE_VERSION: u32 = 2;
 /// Bump when the split output changes (invalidates foreground + background).
 ///
 /// v1: the engine emits a pair of images — `foreground.png` (straight-alpha
