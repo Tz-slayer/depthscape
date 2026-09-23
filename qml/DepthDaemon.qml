@@ -55,6 +55,11 @@ PluginComponent {
     readonly property real threshold: thresholdPercent / 100
     readonly property real feather: featherPercent / 100
 
+    // Keep this in lockstep with engine/src/config.rs. Persisted output paths
+    // are restored before the engine is invoked, so the QML cache key has to
+    // participate in depth-pipeline invalidation too.
+    readonly property int depthPipelineVersion: 2
+
     // DMS's own overview-blur preference. Our background is the shared backdrop,
     // so it has to follow the same setting DMS applies to its wallpaper or the
     // overview would look different with the plugin on than off. Read
@@ -66,7 +71,8 @@ PluginComponent {
     // Changing either parameter or the model invalidates the image pair,
     // so this key is what decides whether a finished job is still worth
     // applying.
-    readonly property string parametersKey: modelType + ":" + threshold.toFixed(4) + ":" + feather.toFixed(4)
+    readonly property string parametersKey: "d" + depthPipelineVersion + ":" + modelType
+        + ":" + threshold.toFixed(4) + ":" + feather.toFixed(4)
 
     // ------------------------------------------------------------------ engine
 
