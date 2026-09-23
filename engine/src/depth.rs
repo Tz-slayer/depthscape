@@ -180,7 +180,13 @@ fn normalise(values: &[f32]) -> Vec<f32> {
     let span = maximum - minimum;
     values
         .iter()
-        .map(|value| ((value - minimum) / span).clamp(0.0, 1.0))
+        .map(|value| {
+            if value.is_finite() {
+                ((value - minimum) / span).clamp(0.0, 1.0)
+            } else {
+                0.5
+            }
+        })
         .collect()
 }
 
