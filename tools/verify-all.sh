@@ -57,7 +57,10 @@ ui = set(re.findall(r'settingKey:\s*"([^"]+)"',
                     pathlib.Path("qml/DepthSettings.qml").read_text()))
 daemon = set(re.findall(r'pluginData\.([A-Za-z0-9_]+)',
                         pathlib.Path("qml/DepthDaemon.qml").read_text()))
-orphans = sorted(ui - daemon)
+# These keys persist presentation state local to the settings page. They are
+# intentionally not runtime inputs consumed by the daemon.
+ui_only = {"ipcCommandsExpanded", "usageGuideExpanded"}
+orphans = sorted(ui - daemon - ui_only)
 if orphans:
     print("settings keys the daemon never reads:", ", ".join(orphans))
     sys.exit(1)

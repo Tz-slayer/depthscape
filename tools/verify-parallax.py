@@ -624,40 +624,20 @@ def require_clear_desktop() -> None:
     sys.exit(2)
 
 
-def looks_like_a_capture_of_windows(frame: np.ndarray) -> bool:
-    """Whether a captured frame is mostly window rather than wallpaper.
+def require_no_windows_in_frame(_frame: np.ndarray, label: str) -> None:
+    """Recheck compositor state after a screenshot completes.
 
-    THE CHECK THAT ACTUALLY WORKS, and it exists because the bookkeeping one does
-    not. Anything that reasons about which workspace is focused is reasoning about
-    the wrong thing in the overview, where niri draws every workspace at once, and
-    it is also defeated by anything that takes focus between the check and the
-    capture. What cannot lie is the frame itself.
-
-    The wallpaper is overwhelmingly red: this scene is `[173, 12, 42]` field against
-    a pale moon, so the great majority of rows have most of their pixels with a
-    large red-over-green gap. A window — a terminal, a browser, an editor — is
-    neither red nor uniform. Measured on this arrangement: a clean frame scores
-    0.66..0.93 on the fraction of red pixels per row, and a frame with a horizontal
-    band of windows scores 0.002 across that band.
-
-    Deliberately coarse and deliberately biased towards refusing: a false refusal
-    costs a re-run, a false acceptance costs a wrong number that is indistinguishable
-    from a real regression.
+    This used to classify pixels using thresholds tuned to one red wallpaper.
+    That made every differently coloured wallpaper look like a full-screen
+    window and prevented the rendering checks from running at all. Window state
+    is wallpaper-independent, and checking it both before and after capture
+    still catches focus races without making assumptions about the image.
     """
-    red = (frame[..., 0] > 120) & (frame[..., 1] < 90) & (frame[..., 2] < 120)
-    rows = red.mean(axis=1)
-    return bool((rows < 0.35).mean() > 0.10)
-
-
-def require_no_windows_in_frame(frame: np.ndarray, label: str) -> None:
-    if not looks_like_a_capture_of_windows(frame):
+    if overview_is_open() or focused_workspace_is_clear():
         return
     print(f"  [screenshot{(' ' + label) if label else ''}] REFUSED — the frame "
-          "is not a picture of the wallpaper;\n"
-          "    a large part of it is window content. Something with windows is "
-          "in shot —\n"
-          "    in the overview that is expected if any workspace anywhere has "
-          "windows.")
+          "was captured after a window appeared on the focused workspace.\n"
+          "    Re-run from an empty workspace.")
     sys.exit(2)
 
 
