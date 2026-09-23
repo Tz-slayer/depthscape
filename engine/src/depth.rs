@@ -223,6 +223,14 @@ mod tests {
     }
 
     #[test]
+    fn normalise_handles_the_full_finite_float_range() {
+        let normalised = normalise(&[-f32::MAX, 0.0, f32::MAX]);
+
+        assert_eq!(normalised, vec![0.0, 0.5, 1.0]);
+        assert!(normalised.iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
     fn chw_layout_is_channel_major_and_normalised() {
         // One pixel, pure white.
         let planar = to_normalised_chw(&[255, 255, 255], 1, 1);
