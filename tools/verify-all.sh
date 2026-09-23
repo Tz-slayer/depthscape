@@ -67,6 +67,25 @@ if orphans:
 PY
 report "settings keys match the daemon" $?
 
+# Persisted output paths bypass the engine entirely on shell restart. The QML
+# cache key must therefore advance whenever the Rust depth pipeline does, or an
+# upgraded plugin can keep restoring PNGs produced by an older pipeline.
+python3 - <<'PY'
+import re, sys, pathlib
+rust = pathlib.Path("engine/src/config.rs").read_text()
+qml = pathlib.Path("qml/DepthDaemon.qml").read_text()
+rust_match = re.search(r'DEPTH_PIPELINE_VERSION:\s*u32\s*=\s*(\d+)', rust)
+qml_match = re.search(r'depthPipelineVersion:\s*(\d+)', qml)
+if not rust_match or not qml_match:
+    print("depth pipeline cache version is missing from Rust or QML")
+    sys.exit(1)
+if rust_match.group(1) != qml_match.group(1):
+    print("depth pipeline cache version mismatch:",
+          "Rust", rust_match.group(1), "QML", qml_match.group(1))
+    sys.exit(1)
+PY
+report "depth pipeline cache versions match" $?
+
 echo
 echo "=== engine ==="
 
