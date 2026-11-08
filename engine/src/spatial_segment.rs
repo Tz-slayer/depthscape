@@ -44,7 +44,12 @@ pub fn predict(
     }
 }
 
-fn predict_isnet(path: &std::path::Path, photo: &RgbImage, width: u32, height: u32) -> Result<GrayImage> {
+fn predict_isnet(
+    path: &std::path::Path,
+    photo: &RgbImage,
+    width: u32,
+    height: u32,
+) -> Result<GrayImage> {
     let mut session = Session::builder()
         .map_err(|e| anyhow::anyhow!("cannot create IS-Net Anime session: {e}"))?
         .with_intra_threads(4)

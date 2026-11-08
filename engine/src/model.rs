@@ -426,7 +426,8 @@ mod tests {
         for dir in ["models/depth-anything-v2-small", "cache/masks", "runtime"] {
             fs::create_dir_all(root.join(dir)).unwrap();
         }
-        let mut model = fs::File::create(root.join("models/depth-anything-v2-small/model.onnx")).unwrap();
+        let mut model =
+            fs::File::create(root.join("models/depth-anything-v2-small/model.onnx")).unwrap();
         model.write_all(&[7u8; 32]).unwrap();
         drop(model);
         fs::write(root.join("cache/masks/mask.png"), b"mask").unwrap();
@@ -437,12 +438,18 @@ mod tests {
         let report = uninstall(&Paths::new(&root)).unwrap();
         assert_eq!(report.removedFiles, 4);
         assert_eq!(report.removedBytes, 32 + 4 + 4 + 2);
-        assert!(!report.removedRoot, "a root containing unrelated files must survive");
+        assert!(
+            !report.removedRoot,
+            "a root containing unrelated files must survive"
+        );
         assert!(!root.join("models").exists());
         assert!(!root.join("cache").exists());
         assert!(!root.join("runtime").exists());
         assert!(!root.join("widgets.json").exists());
-        assert_eq!(fs::read_to_string(root.join("keep.txt")).unwrap(), "user data");
+        assert_eq!(
+            fs::read_to_string(root.join("keep.txt")).unwrap(),
+            "user data"
+        );
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -450,7 +457,8 @@ mod tests {
     fn uninstall_removes_an_empty_data_root() {
         use crate::config::Paths;
 
-        let root = std::env::temp_dir().join(format!("depthscape-purge-empty-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("depthscape-purge-empty-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("models")).unwrap();
         fs::write(root.join("models/model.onnx"), b"model").unwrap();

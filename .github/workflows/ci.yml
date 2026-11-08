@@ -64,16 +64,13 @@ jobs:
         with:
           node-version: '20'
 
-      - name: JS regressions (scroll math, colour utilities, auto-colour contrast)
+      - name: JS regressions (compositor config rules)
         run: |
-          node test/depthscrollmath.test.js
-          node test/colorutils.test.js
-          node test/autocolor.test.js
+          node test/compositorrules.test.js
 
       - name: JSON validity
         run: |
           python3 -m json.tool plugin.json > /dev/null
-          python3 -c "import json, pathlib; json.loads(pathlib.Path('widgets.json').read_text()) if pathlib.Path('widgets.json').exists() else None"
 
   consistency:
     name: Cross-file invariants

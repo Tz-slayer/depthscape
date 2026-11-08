@@ -107,7 +107,12 @@ pub fn guided_filter(
     );
 
     let (guide_squared, cross) = rayon::join(
-        || guide.par_iter().map(|&value| value * value).collect::<Vec<f32>>(),
+        || {
+            guide
+                .par_iter()
+                .map(|&value| value * value)
+                .collect::<Vec<f32>>()
+        },
         || {
             guide
                 .par_iter()

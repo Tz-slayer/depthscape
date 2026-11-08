@@ -387,8 +387,12 @@ pub fn analyze(paths: &Paths, request: &AnalyzeRequest) -> Result<AnalyzeOutcome
                     source_width,
                     source_height,
                 );
-                let prepared =
-                    crate::spatial_assets::prepare(paths, source, &spatial_depth, request.spatial_model)?;
+                let prepared = crate::spatial_assets::prepare(
+                    paths,
+                    source,
+                    &spatial_depth,
+                    request.spatial_model,
+                )?;
                 cache::atomic_write(&spatial_entry.background_path, &prepared.background)?;
                 cache::atomic_write(&spatial_entry.foreground_path, &prepared.foreground)?;
                 cache::atomic_write(&spatial_entry.depth_path, &prepared.depth)?;
