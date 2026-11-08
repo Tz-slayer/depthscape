@@ -24,7 +24,8 @@ PluginSettings {
     property int daemonLookupTries: 0
     property bool confirmPurge: false
     property bool buildingEngine: false
-    property bool downloadingEngine: false
+    property bool downloadingEngine: (root.daemon && root.daemon.downloadingEngine) || root._localDownloadingEngine
+    property bool _localDownloadingEngine: false
     property string buildOutput: ""
     property string chosenScreen: ""
 
@@ -117,7 +118,7 @@ PluginSettings {
             onStreamFinished: root.buildOutput = text.trim().split("\n").slice(-1)[0]
         }
         onExited: exitCode => {
-            root.downloadingEngine = false;
+            root._localDownloadingEngine = false;
             if (exitCode === 0) {
                 root.buildOutput = "";
                 root.saveValue("action", "rescanEngine");
@@ -130,10 +131,14 @@ PluginSettings {
     function downloadEngine() {
         if (root.downloadingEngine || root.buildingEngine)
             return;
-        root.downloadingEngine = true;
-        root.buildOutput = "";
-        downloadEngineProcess.command = ["sh", root.pluginRoot + "/tools/download-engine.sh", root.pluginRoot];
-        downloadEngineProcess.running = true;
+        if (root.daemon && root.daemon.downloadPrebuiltEngine) {
+            root.daemon.downloadPrebuiltEngine();
+        } else {
+            root._localDownloadingEngine = true;
+            root.buildOutput = "";
+            downloadEngineProcess.command = ["sh", root.pluginRoot + "/tools/download-engine.sh", root.pluginRoot];
+            downloadEngineProcess.running = true;
+        }
     }
 
     // Displays

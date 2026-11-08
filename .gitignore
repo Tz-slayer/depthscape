@@ -3,6 +3,7 @@
 /engine/spatial3d/build/
 /engine/spatial-assets/build/
 /qml/native/
+/bin/
 
 # Written by tools/make-preview.py
 /preview.html

@@ -57,6 +57,13 @@ Item {
             return "re-checking for the depthscape-engine binary";
         }
 
+        function downloadEngine(): string {
+            if (!root.daemon)
+                return "daemon not ready";
+            root.daemon.downloadPrebuiltEngine();
+            return "downloading prebuilt depth engine";
+        }
+
         function generate(): string {
             if (!root.daemon)
                 return "daemon not ready";

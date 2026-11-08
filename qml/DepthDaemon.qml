@@ -224,6 +224,8 @@ PluginComponent {
 
     property string enginePath: ""
     property string engineProblem: ""
+    property bool downloadingEngine: false
+    property bool engineAutoDownloadAttempted: false
     property bool modelReady: false
     property bool modelBusy: false
     property string installingModel: ""
@@ -924,12 +926,49 @@ PluginComponent {
                     root.enginePath = found;
                     root.engineProblem = "";
                     root.checkModel();
+                } else if (!root.engineAutoDownloadAttempted) {
+                    root.engineAutoDownloadAttempted = true;
+                    root.downloadPrebuiltEngine();
                 } else {
-                    root.engineProblem = I18n.tr("Build the engine with `cargo build --release` in the engine/ directory.");
+                    root.engineProblem = I18n.tr("Depth engine binary not found. Download or build it in settings.");
                     root.publish();
                 }
             }
         }
+    }
+
+    Process {
+        id: downloadEngineProcess
+
+        command: ["sh", root.pluginDir + "/tools/download-engine.sh", root.pluginDir]
+        onExited: exitCode => {
+            root.downloadingEngine = false;
+            if (exitCode === 0) {
+                if (typeof ToastService !== "undefined" && ToastService.showInfo) {
+                    ToastService.showInfo(I18n.tr("Depthscape"), I18n.tr("Depth engine downloaded successfully."), "", "depthscape-engine-ready");
+                }
+                root.rescanEngine();
+            } else {
+                root.engineProblem = I18n.tr("Failed to auto-download engine. Build or retry in settings.");
+                if (typeof ToastService !== "undefined" && ToastService.showWarning) {
+                    ToastService.showWarning(
+                        I18n.tr("Depthscape: engine setup required"),
+                        I18n.tr("Could not download prebuilt engine. Open plugin settings to retry or build from source."),
+                        "", "depthscape-engine-missing");
+                }
+                root.publish();
+            }
+        }
+    }
+
+    function downloadPrebuiltEngine() {
+        if (downloadingEngine)
+            return;
+        downloadingEngine = true;
+        if (typeof ToastService !== "undefined" && ToastService.showInfo) {
+            ToastService.showInfo(I18n.tr("Depthscape"), I18n.tr("Downloading prebuilt depth engine..."), "", "depthscape-engine-downloading");
+        }
+        downloadEngineProcess.running = true;
     }
 
     // Where models and caches live. tools/resolve-data-root.sh keeps a fresh
@@ -1288,6 +1327,8 @@ PluginComponent {
             uninstallData();
         else if (action === "rescanEngine")
             rescanEngine();
+        else if (action === "downloadEngine")
+            downloadPrebuiltEngine();
         else if (action === "generate")
             enqueueAll();
         else if (action === "clearCache")
