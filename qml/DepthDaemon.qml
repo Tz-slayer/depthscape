@@ -911,6 +911,7 @@ PluginComponent {
         command: [
             "sh", "-c",
             'if [ -n "$DEPTHSCAPE_ENGINE" ] && [ -x "$DEPTHSCAPE_ENGINE" ]; then echo "$DEPTHSCAPE_ENGINE"; ' +
+            'elif [ -x "$1/bin/depthscape-engine" ]; then echo "$1/bin/depthscape-engine"; ' +
             'elif [ -x "$1/engine/target/release/depthscape-engine" ]; then echo "$1/engine/target/release/depthscape-engine"; ' +
             'elif [ -x "$1/engine/target/debug/depthscape-engine" ]; then echo "$1/engine/target/debug/depthscape-engine"; ' +
             'else command -v depthscape-engine; fi',

@@ -28,6 +28,8 @@ QtObject {
             "sh", "-c",
             'if [ -n "$DEPTHSCAPE_ENGINE" ] && [ -x "$DEPTHSCAPE_ENGINE" ]; then ' +
             '  echo ok; ' +
+            'elif [ -x "$1/bin/depthscape-engine" ]; then ' +
+            '  echo ok; ' +
             'elif [ -x "$1/engine/target/release/depthscape-engine" ]; then ' +
             '  echo ok; ' +
             'elif [ -x "$1/engine/target/debug/depthscape-engine" ]; then ' +
@@ -47,8 +49,8 @@ QtObject {
                 console.warn("Depthscape: engine binary missing. Build it with: " + command);
                 if (typeof ToastService !== "undefined" && ToastService.showWarning) {
                     ToastService.showWarning(
-                        I18n.tr("Depthscape: engine not built yet"),
-                        I18n.tr("Build it once, then press Re-check Engine in the plugin settings."),
+                        I18n.tr("Depthscape: engine not found"),
+                        I18n.tr("Download prebuilt binary or build it in plugin settings."),
                         command, "depthscape-engine-missing");
                 }
             }

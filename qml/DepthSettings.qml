@@ -24,6 +24,7 @@ PluginSettings {
     property int daemonLookupTries: 0
     property bool confirmPurge: false
     property bool buildingEngine: false
+    property bool downloadingEngine: false
     property string buildOutput: ""
     property string chosenScreen: ""
 
@@ -96,12 +97,43 @@ PluginSettings {
     }
 
     function buildEngine() {
-        if (root.buildingEngine)
+        if (root.buildingEngine || root.downloadingEngine)
             return;
         root.buildingEngine = true;
         root.buildOutput = "";
         buildProcess.command = ["sh", "-c", root.buildCommand];
         buildProcess.running = true;
+    }
+
+    Process {
+        id: downloadEngineProcess
+
+        command: []
+        running: false
+        stdout: StdioCollector {
+            onStreamFinished: root.buildOutput = text.trim().split("\n").slice(-1)[0]
+        }
+        stderr: StdioCollector {
+            onStreamFinished: root.buildOutput = text.trim().split("\n").slice(-1)[0]
+        }
+        onExited: exitCode => {
+            root.downloadingEngine = false;
+            if (exitCode === 0) {
+                root.buildOutput = "";
+                root.saveValue("action", "rescanEngine");
+            } else if (root.buildOutput === "") {
+                root.buildOutput = I18n.tr("Download failed (exit %1)").arg(exitCode);
+            }
+        }
+    }
+
+    function downloadEngine() {
+        if (root.downloadingEngine || root.buildingEngine)
+            return;
+        root.downloadingEngine = true;
+        root.buildOutput = "";
+        downloadEngineProcess.command = ["sh", root.pluginRoot + "/tools/download-engine.sh", root.pluginRoot];
+        downloadEngineProcess.running = true;
     }
 
     // Displays
@@ -271,6 +303,8 @@ PluginSettings {
     readonly property string buildCommand: "export PATH=\"$HOME/.cargo/bin:$PATH\"; " + root.engineCommand
 
     readonly property string statusText: {
+        if (root.downloadingEngine)
+            return I18n.tr("Downloading prebuilt engine... ") + root.buildOutput;
         if (root.buildingEngine)
             return I18n.tr("Building engine... ") + root.buildOutput;
         if (!root.daemonFound)
@@ -278,7 +312,7 @@ PluginSettings {
         if (!root.engineFound) {
             if (root.buildOutput !== "")
                 return root.buildOutput;
-            return I18n.tr("Engine not built. Press Build Engine, or run: ") + root.engineCommand;
+            return I18n.tr("Engine binary not found. Download prebuilt binary or press Build Engine.");
         }
         if (root.modelBusy)
             return I18n.tr("Working on ") + (root.daemon.installingModel || I18n.tr("model"));
@@ -288,16 +322,17 @@ PluginSettings {
             ? root.daemon.currentModelInfo.name : root.daemon.modelType);
     }
 
-    readonly property string statusIcon: root.buildingEngine ? "hourglass_empty"
+    readonly property string statusIcon: root.downloadingEngine ? "hourglass_empty"
+        : root.buildingEngine ? "hourglass_empty"
         : !root.daemonFound ? "hourglass_empty"
-        : !root.engineFound ? "build"
+        : !root.engineFound ? "download"
         : root.modelBusy ? "hourglass_empty"
         : root.modelReady ? "check_circle" : "download"
 
     readonly property color statusColor: {
         if (!root.engineFound)
-            return (root.buildOutput !== "" && !root.buildingEngine) ? Theme.error : Theme.warning;
-        if (root.modelBusy || root.buildingEngine)
+            return (root.buildOutput !== "" && !root.buildingEngine && !root.downloadingEngine) ? Theme.error : Theme.warning;
+        if (root.modelBusy || root.buildingEngine || root.downloadingEngine)
             return Theme.warning;
         if (!root.modelReady)
             return Theme.warning;
@@ -481,12 +516,22 @@ PluginSettings {
             spacing: Theme.spacingS
 
             DButton {
+                text: I18n.tr("Download Engine")
+                iconName: "download"
+                tooltipText: I18n.tr("Download prebuilt binary from GitHub Releases (no Rust needed)")
+                visible: !root.engineFound
+                busy: root.downloadingEngine
+                enabled: root.daemonFound && !root.downloadingEngine && !root.buildingEngine
+                onClicked: root.downloadEngine()
+            }
+
+            DButton {
                 text: I18n.tr("Build Engine")
                 iconName: "build"
                 tooltipText: root.engineCommand
                 visible: !root.engineFound
                 busy: root.buildingEngine
-                enabled: root.daemonFound && !root.buildingEngine
+                enabled: root.daemonFound && !root.buildingEngine && !root.downloadingEngine
                 onClicked: root.buildEngine()
             }
 
@@ -494,7 +539,7 @@ PluginSettings {
                 text: I18n.tr("Re-check Engine")
                 iconName: "refresh"
                 visible: !root.engineFound
-                enabled: root.daemonFound && !root.buildingEngine
+                enabled: root.daemonFound && !root.buildingEngine && !root.downloadingEngine
                 onClicked: root.saveValue("action", "rescanEngine")
             }
 
