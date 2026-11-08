@@ -45,6 +45,8 @@ echo "=== static checks ==="
 if command -v node >/dev/null; then
     node test/compositorrules.test.js >/dev/null 2>&1
     report "compositor config rule check (node)" $?
+    node test/depthscrollmath.test.js >/dev/null 2>&1
+    report "depth scroll math check (node)" $?
 else
     echo "  SKIP  node regression tests (node not on PATH)"
 fi

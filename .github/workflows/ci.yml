@@ -64,9 +64,10 @@ jobs:
         with:
           node-version: '20'
 
-      - name: JS regressions (compositor config rules)
+      - name: JS regressions (compositor config rules & scroll math)
         run: |
           node test/compositorrules.test.js
+          node test/depthscrollmath.test.js
 
       - name: JSON validity
         run: |
