@@ -1,13 +1,22 @@
 {
     "id": "depthscape",
     "name": "Depthscape",
-    "capabilities": ["daemon", "desktop-widget", "ai"],
+    "version": "0.5.0",
     "category": "appearance",
     "repo": "https://github.com/Tz-slayer/depthscape",
     "author": "Tz-slayer",
-    "description": "AI depth-aware wallpapers for DankMaterialShell: a local depth model erases Depthscape's own background widgets wherever the wallpaper subject is near. Models are downloaded on demand, with optional spatial depth rendering",
-    "dependencies": ["curl"],
-    "compositors": ["niri"],
-    "distro": ["any"],
+    "description": "Depth-aware wallpaper occlusion and interactive 3D spatial parallax for Dux Shell.",
+    "capabilities": [
+        "daemon"
+    ],
+    "dependencies": [
+        "curl"
+    ],
+    "compositors": [
+        "niri"
+    ],
+    "distro": [
+        "any"
+    ],
     "screenshot": "https://raw.githubusercontent.com/Tz-slayer/depthscape/main/assets/screenshot.png"
 }

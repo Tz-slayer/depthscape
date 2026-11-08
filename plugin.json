@@ -1,14 +1,13 @@
 {
     "id": "depthscape",
     "name": "Depthscape",
-    "description": "AI depth-aware wallpapers with on-demand local models, masked background widgets and optional spatial depth rendering",
-    "version": "0.4.0",
+    "description": "Depth-aware wallpaper occlusion and interactive 3D spatial parallax for Dux Shell.",
+    "version": "0.5.0",
     "author": "Tz-slayer",
     "repository": "https://github.com/Tz-slayer/depthscape",
     "type": "daemon",
     "capabilities": [
-        "daemon",
-        "ai"
+        "daemon"
     ],
     "icon": "layers",
     "components": {
