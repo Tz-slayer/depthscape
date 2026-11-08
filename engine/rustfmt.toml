@@ -1,0 +1,16 @@
+# Standard, conservative formatting for the Depthscape engine.
+#
+# Kept as a small, explicit subset of rustfmt's stable options so a
+# contributor's default `cargo fmt` and CI agree without pulling in nightly
+# features. Anything not listed here uses rustfmt's own default.
+edition = "2021"
+max_width = 100
+tab_spaces = 4
+use_small_heuristics = "Default"
+
+# Keep `use` grouping deterministic so review diffs don't churn imports.
+reorder_imports = true
+reorder_modules = true
+
+# Break long chains rather than blow past max_width.
+use_field_init_shorthand = true

@@ -104,7 +104,7 @@ def bench(engine, data_dir, wallpaper, label, prepare, threshold, feather, runs)
     print(f"{'':22s}   stages: {'  '.join(parts)}   "
           f"sum={total:.0f} ms   other={median - total:.0f} ms   "
           f"(wallpaper {last['width']}x{last['height']}, "
-          f"mask {last['maskWidth']}x{last['maskHeight']})")
+          f"mask {last['width']}x{last['height']})")
     return median
 
 

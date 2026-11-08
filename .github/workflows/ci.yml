@@ -1,0 +1,94 @@
+name: ci
+
+# Runs every static check the repo can do without a live DMS session. The
+# `verify-all.sh` script skips qmllint when DMS's QML root isn't available, so
+# this workflow is safe to run on a vanilla runner; contributors who want a
+# stricter local pass can run the same script inside their running shell.
+#
+# Security notes:
+#   * No `github.event.*` payload is ever interpolated into a `run:` command or
+#     a `with:` value — nothing a PR author controls reaches the shell.
+#   * Top-level `permissions` is read-only on contents; jobs inherit it and
+#     cannot elevate. Add an explicit `permissions:` on a job only when it
+#     actually needs more.
+#   * `pull_request_target` is deliberately NOT used — it would run the base
+#     branch's workflow with write scope against PR code.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  engine:
+    name: Rust engine
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+
+      - name: Formatting
+        run: cargo fmt --check
+
+      - name: Lints (warnings allowed, hard errors only on the checks we own)
+        run: cargo clippy --all-targets -- -D rust-2018-idioms -D unused
+
+      - name: Tests
+        run: cargo test --quiet
+
+  qml:
+    name: QML and JS
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: JS regressions (scroll math, colour utilities, auto-colour contrast)
+        run: |
+          node test/depthscrollmath.test.js
+          node test/colorutils.test.js
+          node test/autocolor.test.js
+
+      - name: JSON validity
+        run: |
+          python3 -m json.tool plugin.json > /dev/null
+          python3 -c "import json, pathlib; json.loads(pathlib.Path('widgets.json').read_text()) if pathlib.Path('widgets.json').exists() else None"
+
+  consistency:
+    name: Cross-file invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # The whole verify-all.sh runs here. It self-skips the checks that need
+      # a live DMS session, so the pass/fail on the runner is the sum of what
+      # *is* deterministic.
+      - name: verify-all.sh
+        run: bash tools/verify-all.sh

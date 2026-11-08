@@ -5,7 +5,7 @@
     "category": "appearance",
     "repo": "https://github.com/Tz-slayer/depthscape",
     "author": "Tz-slayer",
-    "description": "AI depth-aware wallpapers: the wallpaper is split into a background and a cut-out subject, and the subject is drawn in front of the widgets and windows above it",
+    "description": "AI depth-aware wallpapers for DankMaterialShell: a local depth model erases Depthscape's own background widgets wherever the wallpaper subject is near. Models are downloaded on demand, with optional spatial depth rendering",
     "dependencies": ["curl"],
     "compositors": ["niri"],
     "distro": ["any"],

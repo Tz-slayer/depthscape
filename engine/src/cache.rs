@@ -1,14 +1,16 @@
-//! Three-tier cache: raw depth maps, refined fields, and split pairs are keyed
-//! separately.
+//! Three-tier cache: raw depth maps, refined fields, and occlusion masks are
+//! keyed separately.
 //!
 //! The three tiers are deliberately independent. Refinement is a property of the
-//! depth field alone, and the split is the only tier that reads the threshold and
-//! feather, so dragging a slider re-runs the split and nothing else. All tiers
+//! depth field alone, and the mask is the only tier that reads the threshold and
+//! feather, so dragging a slider re-runs the mask and nothing else. All tiers
 //! use BLAKE3.
 
 use crate::config::{
-    Paths, DEPTH_CACHE_LIMIT, DEPTH_PIPELINE_VERSION, INPUT_SIZE, MODEL_FINGERPRINT,
-    REFINED_CACHE_LIMIT, SPLIT_CACHE_LIMIT, SPLIT_PIPELINE_VERSION,
+    Paths, DEPTH_CACHE_LIMIT, DEPTH_PIPELINE_VERSION, INPUT_SIZE, MASK_CACHE_LIMIT,
+    MASK_PIPELINE_VERSION, MODEL_FINGERPRINT, PALETTE_CACHE_LIMIT, PALETTE_PIPELINE_VERSION,
+    REFINED_CACHE_LIMIT, SPATIAL_CACHE_LIMIT, SPATIAL_FOREGROUND_FEATHER,
+    SPATIAL_FOREGROUND_THRESHOLD, SPATIAL_PIPELINE_VERSION,
 };
 use anyhow::{bail, Context, Result};
 use std::fs;
@@ -26,9 +28,7 @@ pub fn hash_file(path: &Path) -> Result<String> {
 }
 
 pub fn depth_key_with_fingerprint(wallpaper_hash: &str, fingerprint: &str) -> String {
-    format!(
-        "{wallpaper_hash}-{fingerprint}-d{DEPTH_PIPELINE_VERSION}-i{INPUT_SIZE}"
-    )
+    format!("{wallpaper_hash}-{fingerprint}-d{DEPTH_PIPELINE_VERSION}-i{INPUT_SIZE}")
 }
 
 /// Cache key for the expensive model output.
@@ -40,14 +40,28 @@ pub fn depth_key(wallpaper_hash: &str) -> String {
     depth_key_with_fingerprint(wallpaper_hash, MODEL_FINGERPRINT)
 }
 
-/// Cache key for the split pair, derived from a depth key plus the parameters.
+/// Cache key for the occlusion mask, derived from a depth key plus the sliders.
 ///
-/// The pair is a function of the depth field and the two sliders (the refined
+/// The mask is a function of the depth field and the two sliders (the refined
 /// field is not part of the key because it is itself derived from the depth key
-/// alone), so it is keyed exactly where the old mask tier was.
-pub fn split_key(depth_key: &str, threshold: f32, feather: f32) -> String {
+/// alone).
+pub fn mask_key(depth_key: &str, threshold: f32, feather: f32) -> String {
+    format!("{depth_key}-m{MASK_PIPELINE_VERSION}-t{threshold:.4}-f{feather:.4}")
+}
+
+/// Cache key for the wallpaper's colour palette.
+///
+/// Deliberately keyed on the wallpaper alone, not on model or sliders: the
+/// palette is a pure property of the image, so a threshold nudge must not
+/// regenerate it. Bumping `PALETTE_PIPELINE_VERSION` is the only way to
+/// invalidate it short of deleting the cache.
+pub fn palette_key(wallpaper_hash: &str) -> String {
+    format!("{wallpaper_hash}-p{PALETTE_PIPELINE_VERSION}")
+}
+
+pub fn spatial_key(depth_key: &str, segment_fingerprint: &str) -> String {
     format!(
-        "{depth_key}-s{SPLIT_PIPELINE_VERSION}-t{threshold:.4}-f{feather:.4}"
+        "{depth_key}-seg{segment_fingerprint}-s{SPATIAL_PIPELINE_VERSION}-t{SPATIAL_FOREGROUND_THRESHOLD:.4}-f{SPATIAL_FOREGROUND_FEATHER:.4}",
     )
 }
 
@@ -192,9 +206,7 @@ fn decode_f32_field(
 ) -> Result<Vec<f32>> {
     let (width, height, payload) = split_header(bytes, magic)?;
     if width != expected_width || height != expected_height {
-        bail!(
-            "cache entry is {width}x{height}, expected {expected_width}x{expected_height}"
-        );
+        bail!("cache entry is {width}x{height}, expected {expected_width}x{expected_height}");
     }
     if payload.len() != (width as usize) * (height as usize) * 4 {
         bail!("cache entry payload has the wrong length");
@@ -209,8 +221,39 @@ fn decode_f32_field(
 pub struct CacheEntry {
     pub depth_path: PathBuf,
     pub refined_path: PathBuf,
-    pub foreground_path: PathBuf,
+    pub mask_path: PathBuf,
+}
+
+pub struct SpatialCacheEntry {
     pub background_path: PathBuf,
+    pub foreground_path: PathBuf,
+    pub depth_path: PathBuf,
+    pub matte_path: PathBuf,
+    pub influence_path: PathBuf,
+    pub complete_path: PathBuf,
+}
+
+impl SpatialCacheEntry {
+    pub fn resolve(paths: &Paths, depth_key: &str, segment_fingerprint: &str) -> Self {
+        let key = spatial_key(depth_key, segment_fingerprint);
+        Self {
+            background_path: paths.spatial_cache().join(format!("{key}-background.png")),
+            foreground_path: paths.spatial_cache().join(format!("{key}-foreground.png")),
+            depth_path: paths.spatial_cache().join(format!("{key}-depth.png")),
+            matte_path: paths.spatial_cache().join(format!("{key}-matte.png")),
+            influence_path: paths.spatial_cache().join(format!("{key}-influence.png")),
+            complete_path: paths.spatial_cache().join(format!("{key}-complete")),
+        }
+    }
+
+    pub fn is_cached(&self) -> bool {
+        self.complete_path.is_file()
+            && self.background_path.is_file()
+            && self.foreground_path.is_file()
+            && self.depth_path.is_file()
+            && self.matte_path.is_file()
+            && self.influence_path.is_file()
+    }
 }
 
 impl CacheEntry {
@@ -227,27 +270,22 @@ impl CacheEntry {
         feather: f32,
     ) -> Self {
         let depth = depth_key_with_fingerprint(wallpaper_hash, fingerprint);
-        let split = split_key(&depth, threshold, feather);
-        let directory = paths.split_cache();
+        let mask = mask_key(&depth, threshold, feather);
         Self {
             refined_path: paths
                 .refined_cache()
                 .join(format!("{depth}-r{DEPTH_PIPELINE_VERSION}.dsr")),
             depth_path: paths.depth_cache().join(format!("{depth}.dsc")),
-            foreground_path: directory.join(format!("{split}-fg.png")),
-            background_path: directory.join(format!("{split}-bg.png")),
+            mask_path: paths.mask_cache().join(format!("{mask}.png")),
         }
     }
 
-    /// Whether the cached pair is complete.
+    /// Whether the cached mask is present.
     ///
-    /// Both files must be present: a run interrupted between the two writes
-    /// would otherwise leave a foreground with no matching background, which
-    /// composites into a visible copy of the subject rather than the intended
-    /// cut-out. `atomic_write` makes each file individually all-or-nothing; the
-    /// pair has to be checked as a pair.
-    pub fn split_is_cached(&self) -> bool {
-        self.foreground_path.is_file() && self.background_path.is_file()
+    /// One file, so there is no half-written pair to worry about beyond what
+    /// `atomic_write` already guarantees.
+    pub fn mask_is_cached(&self) -> bool {
+        self.mask_path.is_file()
     }
 }
 
@@ -255,7 +293,35 @@ impl CacheEntry {
 pub fn prune_all(paths: &Paths) -> Result<usize> {
     Ok(prune(&paths.depth_cache(), DEPTH_CACHE_LIMIT)?
         + prune(&paths.refined_cache(), REFINED_CACHE_LIMIT)?
-        + prune(&paths.split_cache(), SPLIT_CACHE_LIMIT)?)
+        + prune(&paths.mask_cache(), MASK_CACHE_LIMIT)?
+        + prune(&paths.palette_cache(), PALETTE_CACHE_LIMIT)?
+        + prune(&paths.spatial_cache(), SPATIAL_CACHE_LIMIT * 6)?)
+}
+
+/// Remove every cached artefact across the four tiers. Model files untouched.
+///
+/// Kept separate from `prune_all`, which only trims down to the retention
+/// limits: the CLI's `clearCache` subcommand and the daemon's cacheProcess both
+/// want the destructive variant, and a user asking to "clear the cache" should
+/// not get back the last N entries.
+pub fn clear_all(paths: &Paths) -> Result<usize> {
+    let mut removed = 0;
+    for directory in [
+        paths.depth_cache(),
+        paths.refined_cache(),
+        paths.mask_cache(),
+        paths.palette_cache(),
+        paths.spatial_cache(),
+    ] {
+        if let Ok(entries) = fs::read_dir(&directory) {
+            for entry in entries.flatten() {
+                if entry.path().is_file() && fs::remove_file(entry.path()).is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]
@@ -263,11 +329,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn split_key_changes_with_parameters_but_depth_key_does_not() {
+    fn mask_key_changes_with_parameters_but_depth_key_does_not() {
         let depth = depth_key("abc");
         assert_eq!(depth, depth_key("abc"));
-        assert_ne!(split_key(&depth, 0.3, 0.08), split_key(&depth, 0.4, 0.08));
-        assert_ne!(split_key(&depth, 0.3, 0.08), split_key(&depth, 0.3, 0.16));
+        assert_ne!(mask_key(&depth, 0.3, 0.08), mask_key(&depth, 0.4, 0.08));
+        assert_ne!(mask_key(&depth, 0.3, 0.08), mask_key(&depth, 0.3, 0.16));
     }
 
     #[test]

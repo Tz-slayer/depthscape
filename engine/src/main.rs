@@ -1,4 +1,4 @@
-//! `depthscape-engine` — offline depth and split producer for the Depthscape plugin.
+//! `depthscape-engine` — offline depth, widget-mask and spatial-layer producer for Depthscape.
 //!
 //! One invocation does one job and prints one JSON object. The engine never
 //! renders and never talks to the compositor; it only turns a wallpaper into
@@ -9,8 +9,11 @@ mod config;
 mod depth;
 mod imageops;
 mod model;
+mod palette;
 mod pipeline;
 mod protocol;
+mod spatial_assets;
+mod spatial_segment;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -21,7 +24,7 @@ use std::path::PathBuf;
 #[command(
     name = "depthscape-engine",
     version,
-    about = "Split wallpapers into a depth-cut foreground and a filled background"
+    about = "Prepare depth-aware masks and optional spatial wallpaper layers"
 )]
 struct Cli {
     /// Plugin data directory. Defaults to $XDG_DATA_HOME/depthscape.
@@ -69,10 +72,23 @@ enum Command {
         /// Model ID to use (e.g. small, base, large). Defaults to small.
         #[arg(long, default_value = "small")]
         model: String,
+
+        /// Prepare foreground/background textures for spatial wallpaper rendering.
+        #[arg(long, default_value_t = false)]
+        spatial: bool,
+
+        /// Foreground model for the spatial layers (isnet-anime, birefnet-lite, birefnet).
+        #[arg(long, default_value = "isnet-anime")]
+        spatial_model: String,
     },
 
-    /// Delete every cached depth map, refined field, and split pair.
+    /// Delete every cached depth, mask, palette, and spatial asset.
     ClearCache,
+
+    /// Remove all downloaded models and generated data (used when the plugin
+    /// is uninstalled). This is the only destructive command; it never touches
+    /// anything outside Depthscape's own data directory.
+    Uninstall,
 }
 
 fn main() -> Result<()> {
@@ -107,29 +123,52 @@ fn main() -> Result<()> {
             if model::state(&paths, descriptor)? != model::ModelState::Ready {
                 bail!("model {} is still not usable after setup", descriptor.id);
             }
-            emit(&protocol::setup(&paths, descriptor, force || !already_ready)?)?;
+            emit(&protocol::setup(
+                &paths,
+                descriptor,
+                force || !already_ready,
+            )?)?;
         }
         Command::Analyze {
             wallpaper,
             threshold,
             feather,
             model,
+            spatial,
+            spatial_model,
         } => {
             let descriptor = config::find_model(&model).ok_or_else(|| model_err(&model))?;
+            let segment_descriptor =
+                config::find_spatial_model(&spatial_model).ok_or_else(|| {
+                    let available = config::SPATIAL_MODELS
+                        .iter()
+                        .map(|desc| desc.id)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    anyhow::anyhow!(
+                        "unknown spatial model '{spatial_model}'; available: {available}"
+                    )
+                })?;
+            let wallpaper = wallpaper
+                .canonicalize()
+                .with_context(|| format!("cannot resolve {}", wallpaper.display()))?;
             let request = pipeline::AnalyzeRequest {
-                wallpaper: wallpaper
-                    .canonicalize()
-                    .with_context(|| format!("cannot resolve {}", wallpaper.display()))?,
+                wallpaper,
                 threshold,
                 feather,
+                spatial,
+                spatial_model: segment_descriptor,
                 model: descriptor,
             };
             let outcome = pipeline::analyze(&paths, &request)?;
             emit(&protocol::AnalyzeReport::from(outcome))?;
         }
         Command::ClearCache => {
-            let removed = pipeline::clear_cache(&paths)?;
+            let removed = cache::clear_all(&paths)?;
             emit(&protocol::ClearReport { removed })?;
+        }
+        Command::Uninstall => {
+            emit(&model::uninstall(&paths)?)?;
         }
     }
     Ok(())

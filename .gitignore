@@ -1,12 +1,24 @@
 # Rust build output
 /engine/target/
+/engine/spatial3d/build/
+/engine/spatial-assets/build/
+/qml/native/
 
 # Written by tools/make-preview.py
 /preview.html
 
-# Local assistant workspace state (notes, scratch) — not part of the plugin
-/.workbuddy-ai/
-
 # Python bytecode
 __pycache__/
 *.pyc
+
+# Machine-local widget layout state (lives next to plugin.json)
+/widgets.json
+
+# Fresh installs keep models/caches here so an uninstall removes them too
+/.data/
+
+# Ignore all dot-directories in the project root (except .github, .git)
+/.*
+!/.gitignore
+!/.editorconfig
+!/.github/

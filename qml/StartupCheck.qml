@@ -1,14 +1,23 @@
 import QtQuick
 import qs.Common
+import qs.Services
 
-// Gates plugin activation on the one thing that would otherwise make the plugin
-// fail silently at the first wallpaper change: the Rust engine binary, which is
-// built separately rather than shipped.
+// First-run gate for the plugin.
 //
-// This used to also check for the Qt5Compat.GraphicalEffects QML module, which
-// the old foreground layer imported for OpacityMask. The engine now emits a
-// straight-alpha RGBA image, so compositing it needs nothing beyond a plain
-// Image — and the check, the dependency and the module are all gone.
+// The Rust engine is built separately from the QML that the plugin store
+// installs, so a fresh install almost never has the binary yet. Blocking
+// activation here used to make the plugin impossible to enable: the user saw a
+// build error, but the settings page (the only place that can explain what to
+// do next, and now the only place that can trigger a model download) belongs
+// to a disabled daemon and never appeared.
+//
+// So the check is advisory: activation always succeeds, and the daemon stays
+// idle until `enginePath` resolves. A warning toast points at the exact build
+// command, and the settings page shows the same state as a first-run step.
+//
+// The old Qt5Compat.GraphicalEffects check was removed: no QML file imports
+// that module any more (the mask is applied with MultiEffect / shaders), so it
+// only ever produced a false "dependency missing" block.
 QtObject {
     id: root
 
@@ -30,14 +39,19 @@ QtObject {
             'fi',
             "sh", root.pluginDir
         ], (stdout, exitCode) => {
-            if (stdout.trim() === "ok") {
-                done(null);
-                return;
+            // Never block activation: a missing engine is a first-run setup
+            // step, not a reason to hide the plugin's own setup UI.
+            done(null);
+            if (stdout.trim() !== "ok") {
+                const command = "cd " + root.pluginDir.replace(/\/$/, "") + "/engine && cargo build --release";
+                console.warn("Depthscape: engine binary missing. Build it with: " + command);
+                if (typeof ToastService !== "undefined" && ToastService.showWarning) {
+                    ToastService.showWarning(
+                        I18n.tr("Depthscape: engine not built yet"),
+                        I18n.tr("Build it once, then press Re-check Engine in the plugin settings."),
+                        command, "depthscape-engine-missing");
+                }
             }
-            done({
-                "title": I18n.tr("Depthscape engine not found"),
-                "details": I18n.tr("Build it with `cargo build --release` inside the engine/ directory, or set DEPTHSCAPE_ENGINE to an existing binary.")
-            });
         });
     }
 }

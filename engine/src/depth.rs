@@ -4,6 +4,7 @@ use anyhow::{bail, Context, Result};
 use ndarray::Array4;
 use ort::session::Session;
 use ort::value::TensorRef;
+use rayon::prelude::*;
 use std::path::Path;
 
 /// Depth Anything emits *relative inverse* depth: larger values are nearer.
@@ -31,13 +32,15 @@ impl DepthModel {
             .unwrap_or(4)
             .min(8);
         let session = Session::builder()
-            .map_err(|error| anyhow::anyhow!("cannot create an ONNX Runtime session builder: {error}"))?
-            .with_intra_threads(threads)
-            .map_err(|error| anyhow::anyhow!("cannot configure ONNX Runtime thread count: {error}"))?
-            .commit_from_file(model_path)
             .map_err(|error| {
-                anyhow::anyhow!("cannot load {}: {error}", model_path.display())
-            })?;
+                anyhow::anyhow!("cannot create an ONNX Runtime session builder: {error}")
+            })?
+            .with_intra_threads(threads)
+            .map_err(|error| {
+                anyhow::anyhow!("cannot configure ONNX Runtime thread count: {error}")
+            })?
+            .commit_from_file(model_path)
+            .map_err(|error| anyhow::anyhow!("cannot load {}: {error}", model_path.display()))?;
         Ok(Self { session, kind })
     }
 
@@ -80,9 +83,9 @@ impl DepthModel {
                     .run(ort::inputs![input])
                     .map_err(|error| anyhow::anyhow!("inference failed: {error}"))?;
 
-                let output = outputs[0]
-                    .try_extract_array::<f32>()
-                    .map_err(|error| anyhow::anyhow!("model output is not an f32 tensor: {error}"))?;
+                let output = outputs[0].try_extract_array::<f32>().map_err(|error| {
+                    anyhow::anyhow!("model output is not an f32 tensor: {error}")
+                })?;
                 let data: Vec<f32> = output.iter().copied().collect();
                 if data.len() != pixels {
                     bail!(
@@ -115,9 +118,9 @@ impl DepthModel {
                     .run(ort::inputs![input])
                     .map_err(|error| anyhow::anyhow!("inference failed: {error}"))?;
 
-                let output = outputs[0]
-                    .try_extract_array::<f32>()
-                    .map_err(|error| anyhow::anyhow!("model output is not an f32 tensor: {error}"))?;
+                let output = outputs[0].try_extract_array::<f32>().map_err(|error| {
+                    anyhow::anyhow!("model output is not an f32 tensor: {error}")
+                })?;
                 let data: Vec<f32> = output.iter().copied().collect();
                 if data.len() != pixels {
                     bail!(
@@ -127,6 +130,9 @@ impl DepthModel {
                 }
                 Ok(sigmoid_mask(&data))
             }
+            ModelKind::SpatialIsNet => {
+                bail!("IS-Net is a spatial foreground model, not a depth model")
+            }
         }
     }
 }
@@ -135,12 +141,18 @@ impl DepthModel {
 fn to_normalised_chw(rgb: &[u8], width: u32, height: u32) -> Vec<f32> {
     let pixels = (width as usize) * (height as usize);
     let mut planar = vec![0f32; pixels * 3];
-    for index in 0..pixels {
-        for channel in 0..3 {
-            let value = rgb[index * 3 + channel] as f32 / 255.0;
-            planar[channel * pixels + index] = (value - MEAN[channel]) / STD[channel];
-        }
-    }
+    let (c0, rest) = planar.split_at_mut(pixels);
+    let (c1, c2) = rest.split_at_mut(pixels);
+    c0.par_iter_mut()
+        .zip(c1.par_iter_mut())
+        .zip(c2.par_iter_mut())
+        .enumerate()
+        .for_each(|(index, ((p0, p1), p2))| {
+            let base = index * 3;
+            *p0 = (rgb[base] as f32 / 255.0 - MEAN[0]) / STD[0];
+            *p1 = (rgb[base + 1] as f32 / 255.0 - MEAN[1]) / STD[1];
+            *p2 = (rgb[base + 2] as f32 / 255.0 - MEAN[2]) / STD[2];
+        });
     planar
 }
 
@@ -148,7 +160,7 @@ fn to_normalised_chw(rgb: &[u8], width: u32, height: u32) -> Vec<f32> {
 /// Maps logits to calibrated foreground probabilities in `0.0..=1.0`.
 fn sigmoid_mask(values: &[f32]) -> Vec<f32> {
     values
-        .iter()
+        .par_iter()
         .map(|&value| {
             if !value.is_finite() {
                 0.0
@@ -165,15 +177,18 @@ fn sigmoid_mask(values: &[f32]) -> Vec<f32> {
 /// image; a constant input is mapped to a constant mid-grey instead of dividing
 /// by zero.
 fn normalise(values: &[f32]) -> Vec<f32> {
-    let mut minimum = f32::INFINITY;
-    let mut maximum = f32::NEG_INFINITY;
-    for value in values {
-        if !value.is_finite() {
-            continue;
-        }
-        minimum = minimum.min(*value);
-        maximum = maximum.max(*value);
-    }
+    let (minimum, maximum) = values
+        .par_iter()
+        .filter(|v| v.is_finite())
+        .fold(
+            || (f32::INFINITY, f32::NEG_INFINITY),
+            |(min, max), &v| (min.min(v), max.max(v)),
+        )
+        .reduce(
+            || (f32::INFINITY, f32::NEG_INFINITY),
+            |(min1, max1), (min2, max2)| (min1.min(min2), max1.max(max2)),
+        );
+
     if !minimum.is_finite() || !maximum.is_finite() || maximum <= minimum {
         return vec![0.5; values.len()];
     }
@@ -183,7 +198,7 @@ fn normalise(values: &[f32]) -> Vec<f32> {
     let minimum64 = minimum as f64;
     let span = maximum as f64 - minimum64;
     values
-        .iter()
+        .par_iter()
         .map(|value| {
             if value.is_finite() {
                 (((*value as f64 - minimum64) / span).clamp(0.0, 1.0)) as f32
@@ -260,7 +275,8 @@ mod tests {
             Ok(val) => val,
             Err(_) => return,
         };
-        let path = std::path::PathBuf::from(home).join(".local/share/depthscape/models/birefnet-lite/model.onnx");
+        let path = std::path::PathBuf::from(home)
+            .join(".local/share/depthscape/models/birefnet-lite/model.onnx");
         if !path.exists() {
             return;
         }
@@ -283,7 +299,8 @@ mod tests {
             Ok(val) => val,
             Err(_) => return,
         };
-        let path = std::path::PathBuf::from(home).join(".local/share/depthscape/models/depth-anything-v3-small/model.onnx");
+        let path = std::path::PathBuf::from(home)
+            .join(".local/share/depthscape/models/depth-anything-v3-small/model.onnx");
         if !path.exists() {
             return;
         }

@@ -3,7 +3,7 @@ name = "depthscape-engine"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.88"
-description = "Depth-aware wallpaper scene engine for DankMaterialShell"
+description = "Depth-aware masks and optional spatial wallpaper layers for DankMaterialShell"
 license = "MIT"
 
 [[bin]]
@@ -24,6 +24,7 @@ image = { version = "0.25", default-features = false, features = [
 ] }
 ort = "=2.0.0-rc.13"
 ndarray = "0.17"
+rayon = "1.10"
 libc = "0.2"
 
 [profile.release]

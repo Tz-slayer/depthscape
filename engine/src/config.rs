@@ -14,6 +14,7 @@ pub enum ModelKind {
     DepthAnything,
     DepthAnythingV3,
     BiRefNet,
+    SpatialIsNet,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,60 +45,9 @@ impl ModelDescriptor {
     }
 }
 
-pub const MODEL_V3_SMALL: ModelDescriptor = ModelDescriptor {
-    id: "v3-small",
-    name: "Depth Anything V3 Small (105MB)",
-    kind: ModelKind::DepthAnythingV3,
-    size: 640_691,
-    sha256: "396008798244a074297fd88e450433b1357fc687f534939375c804ded86e7b2a",
-    fingerprint: "396008798244a074",
-    url: "https://huggingface.co/onnx-community/depth-anything-v3-small/resolve/main/onnx/model.onnx?download=true",
-    directory: "models/depth-anything-v3-small",
-    filename: "model.onnx",
-    extra_file: Some(ExtraFile {
-        filename: "model.onnx_data",
-        url: "https://huggingface.co/onnx-community/depth-anything-v3-small/resolve/main/onnx/model.onnx_data?download=true",
-        size: 104_702_464,
-        sha256: "802bb24741e67f5bb2b369fc64d40afe11439cc895d676d658d65cfb75c9860f",
-    }),
-};
-
-pub const MODEL_V3_BASE: ModelDescriptor = ModelDescriptor {
-    id: "v3-base",
-    name: "Depth Anything V3 Base (413MB)",
-    kind: ModelKind::DepthAnythingV3,
-    size: 646_912,
-    sha256: "d9e7775d8b0340ce9416cfdb4356651ef72abab75eb1485f0aeefa352d78255c",
-    fingerprint: "d9e7775d8b0340ce",
-    url: "https://huggingface.co/onnx-community/depth-anything-v3-base/resolve/main/onnx/model.onnx?download=true",
-    directory: "models/depth-anything-v3-base",
-    filename: "model.onnx",
-    extra_file: Some(ExtraFile {
-        filename: "model.onnx_data",
-        url: "https://huggingface.co/onnx-community/depth-anything-v3-base/resolve/main/onnx/model.onnx_data?download=true",
-        size: 412_068_352,
-        sha256: "09de4dcff3fefe48b04fedbf146151f3339e6115416a72bf9b36dee3aafd03bd",
-    }),
-};
-
-pub const MODEL_V3_LARGE: ModelDescriptor = ModelDescriptor {
-    id: "v3-large",
-    name: "Depth Anything V3 Large (1.38GB)",
-    kind: ModelKind::DepthAnythingV3,
-    size: 1_093_118,
-    sha256: "2c02d70b301b4b51c357e7f04c371e27b5d4a5520a0ef11b8c657627e86b4a7e",
-    fingerprint: "2c02d70b301b4b51",
-    url: "https://huggingface.co/onnx-community/depth-anything-v3-large/resolve/main/onnx/model.onnx?download=true",
-    directory: "models/depth-anything-v3-large",
-    filename: "model.onnx",
-    extra_file: Some(ExtraFile {
-        filename: "model.onnx_data",
-        url: "https://huggingface.co/onnx-community/depth-anything-v3-large/resolve/main/onnx/model.onnx_data?download=true",
-        size: 1_381_741_568,
-        sha256: "3aee647d45b208cbff14f4a738737a4bd9f9e5fbce2c48e7a6db311ea807060c",
-    }),
-};
-
+/// Only three depth estimators are offered: the Depth Anything V2 family.
+/// V3 and BiRefNet are not depth-model options for this plugin; the BiRefNet
+/// descriptors below exist solely as optional spatial foreground segmenters.
 pub const MODEL_SMALL: ModelDescriptor = ModelDescriptor {
     id: "small",
     name: "Depth Anything V2 Small (99MB)",
@@ -163,26 +113,57 @@ pub const MODEL_BIREFNET: ModelDescriptor = ModelDescriptor {
     extra_file: None,
 };
 
-pub const ALL_MODELS: &[ModelDescriptor] = &[
-    MODEL_V3_SMALL,
-    MODEL_V3_BASE,
-    MODEL_V3_LARGE,
-    MODEL_SMALL,
-    MODEL_BASE,
-    MODEL_LARGE,
-    MODEL_BIREFNET_LITE,
-    MODEL_BIREFNET,
-];
+/// The spatial foreground model is independent from the selected depth model.
+pub const SPATIAL_ISNET_ANIME: ModelDescriptor = ModelDescriptor {
+    id: "spatial-isnet-anime",
+    name: "IS-Net Anime (168 MiB)",
+    kind: ModelKind::SpatialIsNet,
+    size: 176_069_933,
+    sha256: "f15622d853e8260172812b657053460e20806f04b9e05147d49af7bed31a6e99",
+    fingerprint: "f15622d853e82601",
+    url: "https://github.com/danielgatis/rembg/releases/download/v0.0.0/isnet-anime.onnx",
+    directory: "models/isnet-anime",
+    filename: "isnet-anime.onnx",
+    extra_file: None,
+};
+
+/// The complete set of depth estimators this plugin offers. `status` reports
+/// exactly these, `setup` only downloads these (plus spatial foreground
+/// models), and the settings page must expose nothing else.
+pub const ALL_MODELS: &[ModelDescriptor] = &[MODEL_SMALL, MODEL_BASE, MODEL_LARGE];
 
 pub fn default_model() -> &'static ModelDescriptor {
     &MODEL_SMALL
 }
 
+/// Resolve any model that can be fetched with `setup --model <id>`.
+///
+/// Depth models come first and are limited to the three V2 variants. Spatial
+/// foreground segmenters are not depth estimators — they never appear in the
+/// depth-model picker — but they still have to be downloadable on demand for
+/// the optional spatial mode.
 pub fn find_model(id: &str) -> Option<&'static ModelDescriptor> {
-    if id.eq_ignore_ascii_case("v3") {
-        return Some(&MODEL_V3_SMALL);
-    }
-    ALL_MODELS.iter().find(|m| m.id.eq_ignore_ascii_case(id))
+    ALL_MODELS
+        .iter()
+        .find(|m| m.id.eq_ignore_ascii_case(id))
+        .or_else(|| find_spatial_model(id))
+}
+
+/// Foreground models that may produce the spatial matte. The depth models are
+/// deliberately excluded: they estimate a field, they do not cut a subject.
+pub const SPATIAL_MODELS: &[&ModelDescriptor] =
+    &[&SPATIAL_ISNET_ANIME, &MODEL_BIREFNET_LITE, &MODEL_BIREFNET];
+
+pub fn find_spatial_model(id: &str) -> Option<&'static ModelDescriptor> {
+    let id = if id.eq_ignore_ascii_case("isnet-anime") || id.eq_ignore_ascii_case("isnet") {
+        SPATIAL_ISNET_ANIME.id
+    } else {
+        id
+    };
+    SPATIAL_MODELS
+        .iter()
+        .copied()
+        .find(|model| model.id.eq_ignore_ascii_case(id))
 }
 
 #[allow(dead_code)]
@@ -204,72 +185,50 @@ pub const BIREFNET_INPUT_SIZE: u32 = 1024;
 /// v2: non-finite model samples are replaced with neutral mid-depth values and
 /// extreme finite ranges are normalised without overflowing.
 pub const DEPTH_PIPELINE_VERSION: u32 = 2;
-/// Bump when the split output changes (invalidates foreground + background).
+/// Bump when the emitted mask changes.
 ///
-/// v1: the engine emits a pair of images — `foreground.png` (straight-alpha
-/// RGBA, subject only) and `background.png` (the wallpaper with the subject
-/// region filled in) — instead of a single occlusion mask.
+/// The engine produces exactly one artefact per wallpaper: a single-channel
+/// 8-bit grayscale occlusion mask at the wallpaper's own resolution. There is no
+/// foreground/background pair — the mask is applied by the consumer, which draws
+/// the wallpaper once and erases the desktop widgets where the mask says the
+/// scene is near. That is the same division of labour the reference
+/// implementation uses, and it removes the inpainting step that a two-image
+/// split required.
 ///
-/// v2: the pair is emitted at the wallpaper's own resolution instead of being
-/// capped at `REFINEMENT_MAX_DIMENSION`. The cap never bought what its comment
-/// claimed — the alpha field does carry structure above 1920, because the guided
-/// filter transfers the wallpaper's own luminance edges onto it — and it cost a
-/// second, coarser resample on the GPU at composite time.
-pub const SPLIT_PIPELINE_VERSION: u32 = 2;
+/// The version is deliberately restarted at 1 rather than continuing the retired
+/// `SPLIT_PIPELINE_VERSION` sequence: the artefact changed *shape*, so there is
+/// no cache entry from the old numbering that this could be confused with.
+pub const MASK_PIPELINE_VERSION: u32 = 1;
+/// Bump when any cached spatial wallpaper texture or field changes.
+pub const SPATIAL_PIPELINE_VERSION: u32 = 9;
+/// Bound spatial textures so two additional layers do not duplicate a 4K source.
+pub const SPATIAL_MAX_DIMENSION: u32 = 2560;
+/// Spatial cutout controls are independent from the desktop-widget occlusion sliders.
+pub const SPATIAL_FOREGROUND_THRESHOLD: f32 = 0.58;
+pub const SPATIAL_FOREGROUND_FEATHER: f32 = 0.08;
+pub const SPATIAL_CACHE_LIMIT: usize = 16;
 
-/// The resolution the emitted images are produced at.
+/// Bump when the wallpaper-derived palette changes shape or colour rules.
 ///
-/// * `Original` — the wallpaper's own size. One resample from source to output,
-///   then a 1:1 blit for an output whose resolution matches the wallpaper. This
-///   is the default: it is the only setting that does not throw away detail the
-///   refine step went to the trouble of recovering.
-/// * `Capped(n)` — never larger than `n` on the long edge, and never larger than
-///   the wallpaper. For a machine where the PNG encode or the resident texture
-///   is the binding constraint rather than quality.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputSize {
-    Original,
-    Capped(u32),
-}
-
-impl OutputSize {
-    /// Resolve against a wallpaper's dimensions.
-    pub fn resolve(self, source_width: u32, source_height: u32) -> (u32, u32) {
-        let (width, height) = (source_width.max(1), source_height.max(1));
-        let cap = match self {
-            OutputSize::Original => return (width, height),
-            OutputSize::Capped(cap) => cap,
-        };
-        let scale = f64::min(1.0, cap as f64 / width.max(height) as f64);
-        (
-            ((width as f64 * scale).round() as u32).max(1),
-            ((height as f64 * scale).round() as u32).max(1),
-        )
-    }
-}
-
-/// Default output size.
+/// The palette is keyed on the wallpaper's own hash (not on model, not on
+/// threshold / feather) because it is a pure colour property of the image.
+/// Keeping the version separate from `MASK_PIPELINE_VERSION` lets the mask
+/// pipeline iterate without regenerating every cached palette sidecar, and
+/// vice versa.
 ///
-/// Overridable at runtime through `$DEPTHSCAPE_OUTPUT_MAX_DIMENSION`, which
-/// selects `Capped(n)` — the escape hatch for a machine where the PNG encode or
-/// the resident GPU texture is the binding constraint rather than quality.
-/// There is deliberately no way to ask for *more* than the wallpaper.
-pub fn output_size() -> OutputSize {
-    match std::env::var_os("DEPTHSCAPE_OUTPUT_MAX_DIMENSION") {
-        Some(value) => match value.to_string_lossy().parse::<u32>() {
-            Ok(cap) if cap > 0 => OutputSize::Capped(cap),
-            _ => OutputSize::Original,
-        },
-        None => OutputSize::Original,
-    }
-}
+/// v2: added the 16×16 relative-luminance grid (`luminanceGrid` /
+/// `gridSize`) the Clock widget samples per-region, and switched `isDark`
+/// from HSL lightness to WCAG relative luminance. Older v1 sidecars lack the
+/// grid and are regenerated on the next generate.
+pub const PALETTE_PIPELINE_VERSION: u32 = 2;
 
 /// Guided-filter refinement is capped at this long edge to bound cost.
 ///
 /// This is a *cost* ceiling on the refine step, NOT a ceiling on the emitted
-/// images — those follow `OUTPUT_SIZE`. Raising it makes the refinement slower
-/// in exchange for a guide image with more real resolution to snap edges to;
-/// lowering it does not shrink the output, only the fidelity of the edges.
+/// mask — the mask is always produced at the wallpaper's own resolution. Raising
+/// this makes the refinement slower in exchange for a guide image with more real
+/// resolution to snap edges to; lowering it does not shrink the output, only the
+/// fidelity of the edges.
 ///
 /// Kept at 1920 so that the common case — a wallpaper no larger than this —
 /// runs the filter at exactly the resolution it will be displayed at.
@@ -277,42 +236,27 @@ pub const REFINEMENT_MAX_DIMENSION: u32 = 1920;
 pub const GUIDED_FILTER_RADIUS: u32 = 8;
 pub const GUIDED_FILTER_EPSILON: f32 = 0.001;
 
-/// Radius, as a fraction of the image's short edge, of the blur that fills in
-/// the region the subject was cut out of.
-///
-/// Large on purpose: the fill has to read as out-of-focus background, not as a
-/// smeared copy of the subject. At 6% of a 1080px short edge the radius is 65px,
-/// which is far wider than any feature the subject could leave behind.
-pub const FILL_BLUR_FRACTION: f32 = 0.06;
-
-/// Number of box-filter passes used to approximate a Gaussian.
-///
-/// Three passes converge to within ~3% of a true Gaussian, which is invisible
-/// here — the fill is deliberately low-detail, so approximating it is free.
-pub const FILL_BLUR_PASSES: u32 = 3;
-
-/// Iterations of the dilation that grows the cut-out region before it is filled.
-///
-/// The fill reads only from pixels *outside* the subject, so the region it
-/// replaces has to be grown first: at the subject's own boundary the alpha ramp
-/// is half-transparent, and filling right up to it would let the blur average in
-/// the very pixels being removed — a bright halo tracing the subject.
-pub const FILL_DILATE_PIXELS: u32 = 4;
-
 /// LRU retention for the cache tiers.
 ///
-/// The split pair is by far the largest per entry (two full images at refinement
-/// resolution), so it is kept smallest.
+/// The mask is the tier the user actually sees, and it is the one the sliders
+/// regenerate, so it is kept far deeper than the intermediates it is derived
+/// from — matching the retention the reference implementation settled on.
 pub const DEPTH_CACHE_LIMIT: usize = 8;
-pub const REFINED_CACHE_LIMIT: usize = 4;
-pub const SPLIT_CACHE_LIMIT: usize = 8;
+pub const REFINED_CACHE_LIMIT: usize = 8;
+pub const MASK_CACHE_LIMIT: usize = 32;
+// Palettes are small JSON sidecars (~500 bytes) keyed by the wallpaper's
+// hash, so retention can be deep without a real disk cost. Matched to the
+// mask tier so every wallpaper that still has a mask also has a palette.
+pub const PALETTE_CACHE_LIMIT: usize = 32;
 
 /// Relative layout inside the plugin data directory.
 #[allow(dead_code)]
 pub const DIR_MODEL: &str = "models/depth-anything-v2-small";
 pub const DIR_DEPTH_CACHE: &str = "cache/depth";
 pub const DIR_REFINED_CACHE: &str = "cache/refined";
-pub const DIR_SPLIT_CACHE: &str = "cache/split";
+pub const DIR_MASK_CACHE: &str = "cache/masks";
+pub const DIR_PALETTE_CACHE: &str = "cache/palettes";
+pub const DIR_SPATIAL_CACHE: &str = "cache/spatial";
 pub const DIR_RUNTIME: &str = "runtime";
 
 /// Resolved filesystem layout for one engine invocation.
@@ -348,7 +292,9 @@ impl Paths {
     }
 
     pub fn model_for(&self, descriptor: &ModelDescriptor) -> PathBuf {
-        self.root.join(descriptor.directory).join(descriptor.filename)
+        self.root
+            .join(descriptor.directory)
+            .join(descriptor.filename)
     }
 
     pub fn depth_cache(&self) -> PathBuf {
@@ -359,8 +305,16 @@ impl Paths {
         self.root.join(DIR_REFINED_CACHE)
     }
 
-    pub fn split_cache(&self) -> PathBuf {
-        self.root.join(DIR_SPLIT_CACHE)
+    pub fn mask_cache(&self) -> PathBuf {
+        self.root.join(DIR_MASK_CACHE)
+    }
+
+    pub fn palette_cache(&self) -> PathBuf {
+        self.root.join(DIR_PALETTE_CACHE)
+    }
+
+    pub fn spatial_cache(&self) -> PathBuf {
+        self.root.join(DIR_SPATIAL_CACHE)
     }
 
     pub fn runtime(&self) -> PathBuf {
@@ -380,7 +334,9 @@ impl Paths {
         for dir in [
             self.depth_cache(),
             self.refined_cache(),
-            self.split_cache(),
+            self.mask_cache(),
+            self.palette_cache(),
+            self.spatial_cache(),
             self.runtime(),
         ] {
             std::fs::create_dir_all(&dir)

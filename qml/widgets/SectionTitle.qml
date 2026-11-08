@@ -1,154 +1,37 @@
 import QtQuick
 import qs.Common
 import qs.Widgets
+import qs.DCommon.Widgets
 
 Item {
     id: root
-    width: parent ? parent.width : 500
-    implicitWidth: width
-    implicitHeight: 32
-    height: implicitHeight
 
-    property alias text: titleText.text
+    property string text: ""
     property string icon: ""
 
-    property bool showReset: false
-    signal resetClicked()
-    signal clicked() // Tín hiệu mới cho hành động nhấn vào tiêu đề
-
-    property bool hoverEnabled: false
-    readonly property bool isHovered: hoverArea.containsMouse
-    property color titleColor: (hoverEnabled && isHovered) ? Theme.primary : Theme.surfaceText
-
-    property bool collapsible: false
-    property bool isExpanded: true
-    property string settingKey: ""
-
-    property bool _isInitialized: false
-
-    // For the page-wide reset walk: collapse state is persisted too, so it has
-    // to be restorable from a default rather than from a second hand-written
-    // table in the settings page.
-    function revertToDefault() {
-        const settings = _findSettings();
-        if (settingKey === "" || !settings)
-            return;
-        _isInitialized = false;
-        isExpanded = true;
-        settings.saveValue(settingKey, true);
-        _isInitialized = true;
-    }
-
-    function _loadPersistence() {
-        if (settingKey === "") return;
-        const settings = _findSettings();
-        if (settings && settings.pluginService) {
-            isExpanded = settings.loadValue(settingKey, true);
-            _isInitialized = true;
-        }
-    }
-
-    onIsExpandedChanged: {
-        if (settingKey === "" || !_isInitialized) return;
-        const settings = _findSettings();
-        if (settings) {
-            settings.saveValue(settingKey, isExpanded);
-        }
-    }
-
-    Component.onCompleted: {
-        Qt.callLater(_loadPersistence);
-    }
-
-    function _findSettings() {
-        let item = parent;
-        while (item) {
-            if (item.saveValue !== undefined && item.loadValue !== undefined) {
-                return item;
-            }
-            item = item.parent;
-        }
-        return null;
-    }
+    width: parent ? parent.width : 0
+    implicitHeight: titleRow.implicitHeight
+    height: implicitHeight
 
     Row {
         id: titleRow
-        anchors.centerIn: parent
+        anchors.horizontalCenter: parent.horizontalCenter
         spacing: Theme.spacingS
-        width: Math.min(implicitWidth, parent.width - 100)
 
-        DankIcon {
+        DIcon {
             name: root.icon
-            size: 18
-            color: root.titleColor
-            visible: root.icon !== ""
+            size: Theme.iconSizeMedium
+            color: Theme.primary
             anchors.verticalCenter: parent.verticalCenter
+            visible: root.icon !== ""
         }
 
         StyledText {
-            id: titleText
-            font.pixelSize: Theme.fontSizeLarge
-            font.weight: Font.Bold
-            color: root.titleColor
+            text: root.text
+            font.pixelSize: Theme.fontSizeMedium
+            font.weight: Font.DemiBold
+            color: Theme.surfaceText
             anchors.verticalCenter: parent.verticalCenter
-            elide: Text.ElideRight
-            horizontalAlignment: Text.AlignHCenter
-        }
-
-        DankIcon {
-            name: root.isExpanded ? "expand_less" : "expand_more"
-            size: 16
-            color: Theme.surfaceVariantText
-            visible: root.collapsible
-            anchors.verticalCenter: parent.verticalCenter
-        }
-    }
-
-    MouseArea {
-        id: hoverArea
-        anchors.fill: parent
-        hoverEnabled: root.hoverEnabled || root.collapsible
-        cursorShape: (root.collapsible || root.hoverEnabled) ? Qt.PointingHandCursor : Qt.ArrowCursor
-        onClicked: {
-            if (root.collapsible) {
-                root.isExpanded = !root.isExpanded;
-            }
-            root.clicked(); // Phát tín hiệu khi người dùng nhấn
-        }
-    }
-
-    Item {
-        id: resetButton
-        width: 32
-        height: 32
-        visible: root.showReset
-        anchors.right: parent.right
-        anchors.verticalCenter: parent.verticalCenter
-
-        Rectangle {
-            anchors.fill: parent
-            radius: height / 2
-            color: resetArea.containsMouse ? Theme.primaryHoverLight : "transparent"
-        }
-
-        DankIcon {
-            name: "restart_alt"
-            size: 18
-            color: Theme.primary
-            anchors.centerIn: parent
-            opacity: root.showReset ? 1 : 0
-            Behavior on opacity { NumberAnimation { duration: Appearance.anim.durations.quick } }
-        }
-
-        MouseArea {
-            id: resetArea
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: {
-                console.log(`[SectionTitle] Reset button clicked for: ${root.text}`);
-                root.resetClicked();
-            }
         }
     }
 }

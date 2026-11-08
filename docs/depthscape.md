@@ -5,6 +5,40 @@
 
 ---
 
+> ## ⚠️ 架构已变（2026-09-23 一次，2026-10-17 一次）
+> **本文大部分内容描述的是已移除的方案**，请先读这段再决定信哪一节。
+>
+> 引擎现在**只产出一件东西**：单张 LA8 遮挡 mask（原分辨率）。
+> **不再拆分前景/背景，也不再 inpaint**——壁纸本来就显示主体，擦掉 widget 就够了。
+>
+> | 本文的说法 | 现状 |
+> |---|---|
+> | §14.2「拆图：为什么必须输出两张图」 | **已作废**。那套论证建立在「前景直接叠在壁纸上」的前提上；现在遮挡靠**擦除 widget**实现，不需要第二张图 |
+> | §14.6「overview：我们的图就是那块共享 backdrop」 | **部分作废**。Depthscape surfaces 通过 `place-within-backdrop` 共享 backdrop；具体渲染行为以当前实现为准 |
+> | 视差（前景 12% / 背景 4%） | **已移除**。前景/背景差速那套删了；`DepthParallax.qml` 换成 `DepthWorkspaceTracker.qml`，`DepthScrollMath.js` 重写为单指数曲线（画布整体平移） |
+> | 三级缓存里的 split 层 | 改为 **mask 层**（`cache/masks`，保留 32 份）；另加 **palette 层**（逐输出亮度网格） |
+> | §8「设置页面建议」的字段清单 | 已被 `docs/settings.md` 取代：内联预览 + 独立弹窗两层，另有 background widget 编辑器、字体预设、逐输出预览 |
+>
+> **当前管线**（与 Noctalia Wallpaper Depth 一致）：
+>
+> ```text
+> wallpaper → Depth Anything V2 → 相对深度 → 归一化
+>           → 原图引导的 guided filter（≤1920）→ BICUBIC 放大到原分辨率
+>           → smoothstep(threshold, feather) → 灰度遮挡 mask（LA8 PNG）
+>           → OpacityMask(invert) 应用到 widget 层（擦除）
+> ```
+>
+> **当前桌面构成**：`background` 层 surface——`:wallpaper`、`:widgets` 与可选 `:foreground`，共享 `place-within-backdrop` 规则；画布跟随工作区平移（壁纸/mask 刚体，
+> widget 额外漂移），越过主体的部分被 mask 擦掉。壁纸、mask、palette、widget 布局
+> 全部**逐输出**。实现见 `qml/DepthWallpaper.qml`、`qml/DepthBackgroundWidgetHost.qml`、
+> `qml/DepthWorkspaceTracker.qml`、`qml/DepthBackgroundWidgetRegistry.qml`。
+>
+> **本文其余章节仍可作为背景与踩坑记录阅读**，但任何与「拆图 / inpaint / 前景背景
+> 差速视差 / overview 淡出」相关的结论都不要再当作现状。**树结构和文件清单一律以
+> §9 为准。**
+
+---
+
 ## 1. 项目简介
 
 **depthscape** 是一个面向 DankMaterialShell（DMS）的景深壁纸与交互壁纸扩展项目。
@@ -18,6 +52,15 @@
 - 基于深度图的 Shader 效果；
 - 可选的粒子、音频响应和场景交互；
 - 多显示器独立壁纸与独立缓存。
+
+**当前实际交付的能力**（上面那份目标列表里的"前景遮挡 / Shader / 粒子 / 音频响应"
+尚未实现，正文里对它们的描述都是设想）：
+
+- 壁纸变化时跑一次 Depth Anything V2，产出单张 LA8 遮挡 mask；
+- 桌面背景 widget（时钟 / 格言 / 日历）越过主体时被 mask 擦除，形成俯冲遮挡；
+- 画布跟随 niri 工作区平移，widget 可额外漂移；
+- 壁纸、mask、调色板与 widget 布局都按输出独立；
+- 设置分"内联预览 + 独立弹窗"两层，预览在屏幕坐标系里渲染。
 
 项目遵循一个核心原则：
 
@@ -106,7 +149,7 @@ Foreground / Background Split
 ```text
 DepthForeground     ← 主体，straight alpha
         ↑
-DepthWidgetHost     ← 自研 clock 等桌面组件
+DepthBackgroundWidgetHost  ← background widget（由插件注册，Depthscape 不自带）
         ↑
 DepthBackground     ← 填充后的背景（不透明）
 ```
@@ -178,7 +221,7 @@ niri 导航事件（轮询）
     └── Background: +offset（与前景 1:1 保持一致）
 ```
 
-最终形成整体壁纸平移、与静止的桌面 widget 相对运动产生的景深感（两层 1:1 同步移动彻底杜绝了背景修补区域边缘露馅）。
+最终形成整体壁纸平移、与静止的 background widget 相对运动产生的景深感（两层 1:1 同步移动彻底杜绝了背景修补区域边缘露馅）。
 
 **已实现（2026-09-21），见 §14.7。** 与初版设计的差异：位移是**累计状态**而非
 逐次动画；前景与背景两层**1:1 同步一致移动**，**widget 不动**作为静止参考系；水平轴在空 workspace 上静止。
@@ -210,7 +253,7 @@ flowchart TB
 
     subgraph LAYERS[background 层 + 共享 backdrop，按 map 顺序]
         BG[DepthBackground<br/>depthscape:background]
-        WH[DepthWidgetHost<br/>depthscape:widgets]
+        WH[DepthBackgroundWidgetHost<br/>depthscape:widgets]
         FG[DepthForeground<br/>depthscape:foreground]
     end
 
@@ -263,10 +306,10 @@ surface，在 overview 里**逐卡片克隆**。详见 §14.6。
 `^quickshell$` 规则），它在 `pluginReadyKey` 变化时重建、会排到我们之上。
 这是 §14.6 里 `startupRaise` 必须重试多次的原因。
 
-`DepthWidgetHost` 是 Depthscape **自研**的 widget 宿主，不是 DMS 的桌面
-Widget。DMS 的桌面 Widget 在 `bottom` 层（**比我们高**，永远画在主体之上），
-而且按 workspace card 实例化，同一个时钟会在每个 workspace 各出现一次。
-见 §14.1 与 §14.5。
+`DepthBackgroundWidgetHost` 是 Depthscape **自研**的 background widget 宿主，
+不是 DMS 的桌面 widget。DMS 的桌面 widget 在 `bottom` 层（**比我们高**，永远
+画在主体之上），而且按 workspace card 实例化，同一个时钟会在每个 workspace
+各出现一次。见 §14.1 与 §14.5。
 
 ---
 
@@ -548,7 +591,11 @@ split   = depth - v<split pipeline 版本> - t<threshold> - f<feather>   (-fg/-b
 
 ### 7.4 Splitter
 
-根据精修后的深度场，把壁纸拆成前景与背景两张图。**不输出遮罩**（§14.2）。
+> **已作废（2026-09-23）**：拆图件 `DepthBackground.qml` / `DepthForeground.qml`
+> 已删除，引擎改为只输出单张 LA8 mask。本节保留是因为它解释了 mask 的
+> threshold / feather 两个参数为什么是现在这个范围。现状见 §14.2 前言。
+
+（原文）根据精修后的深度场，把壁纸拆成前景与背景两张图。**不输出遮罩**（§14.2）。
 
 主要参数：
 
@@ -589,7 +636,12 @@ box_blur_rgb(source, r, 3 passes)           近似高斯，用于填洞
 
 ### 7.5 Compositor（三个 surface）
 
-负责实时桌面效果。三个 `PanelWindow` 全在 **`background` 层**，且共用一条
+> **已作废（2026-09-23）**：现在是**两个** surface——`DepthWallpaper.qml`
+> （`:wallpaper`，壁纸 + 画布平移）与 `DepthBackgroundWidgetHost.qml`
+> （`:widgets`，OpacityMask(invert) 擦 widget）。分阶段映射（stage 0→2）与
+> startupRaise 的逻辑仍然有效。原文的"三个 surface / 前景参与视差"不再适用。
+
+（原文）负责实时桌面效果。三个 `PanelWindow` 全在 **`background` 层**，且共用一条
 `place-within-backdrop true` 规则（§14.6），按 map 顺序叠，
 由 `DepthDaemon` **分阶段**（stage 0→3）映射，并在启动后**多次重建**以抢过
 DMS 的原生壁纸。
@@ -603,7 +655,7 @@ DMS 的原生壁纸。
 ```text
 DepthBackground     background.png        主体被挖掉的场景       ← 视差：+s（与前景 1:1 一致）
       ↓
-DepthWidgetHost     自研 widget（如时钟）   主体要遮挡的东西       ← 视差：不动
+DepthBackgroundWidgetHost   background widget（如时钟）   主体要遮挡的东西   ← 视差：不动
       ↓
 DepthForeground     foreground.png        主体，最后 map → 压在最上 ← 视差：+s（与背景 1:1 一致）
 ```
@@ -614,7 +666,7 @@ DepthForeground     foreground.png        主体，最后 map → 压在最上 �
 
 **视差只有前景与背景两层参与**（§14.7）。每层外面套一个比视口大的容器，
 内部的 `Image` 仍按视口几何居中，容器整体按 `offset` 平移——这是"大画布"模型，
-**不是 `scale`**。widget 层完全不接偏移：它是主体站立的场景，是深度被读取时
+**不是 `scale`**。background widget 层完全不接偏移：它是主体站立的场景，是深度被读取时
 的参照系。
 
 #### overview 处理
@@ -691,6 +743,12 @@ Depthscape Plugin
 
 ### 设置页面建议
 
+> **已被 §`docs/settings.md` 取代（2026-10-17）**：设置内容拆成"内联预览 +
+> 独立弹窗"两层，字段比下面这份多了 background widget 编辑器、字体预设、
+> 逐输出预览。下面保留作为最初的字段清单。
+
+（原文）
+
 ```text
 Depthscape
 │
@@ -736,79 +794,94 @@ Depthscape
     └── DP-1
 ```
 
-**已实现的部分**（`qml/DepthSettings.qml`，2026-09-21）：General 的 Enable /
-Auto Analyze、Occlusion 的 Threshold / Feather、Widgets 的 Enable 与布局文件
-提示、Model 的三个按钮、Parallax 与 Overview 两节。Cache Size 与 Displays
-两节尚未做。
+**已实现的部分**（`qml/DepthSettings*.qml`，2026-10-18）：完整设计见
+`docs/settings.md`。弹窗是"hub + 推入"两层：hub 首屏是当前桌面横幅 + 三张
+分类卡（景深遮罩 / 画布视差 / 桌面组件）+ 底部三行参考；每个分类推入一页，
+页首常驻一条 hero 预览。**Model 下载与缓存清理只有 IPC 命令，界面上没有按钮**；
+Cache Size 与 Displays 两节仍未做。
 
 ---
 
 ## 9. 项目结构
 
-以下是 V0.1 已落地的实际结构：
+> 本节描述**当前树**（2026-10-17）。旧版本描述的三 surface / 拆图 / 轮询视差
+> 结构已不存在，被删文件名见 §14.2 前言的作废清单。
 
 ```text
 depthscape/
 ├── README.md
-├── plugin.json                 DMS Composite Plugin 清单
+├── plugin.json                 DMS Composite Plugin 清单（daemon + desktop + settings）
 │
 ├── qml/                        Shell 侧（QML / QtQuick）
-│   ├── DepthDaemon.qml         daemon：壁纸监听、任务队列、三 surface 分阶段映射、视差分发
-│   ├── DepthBackground.qml     background 层背景 surface（大画布 + 反向位移）
-│   ├── DepthWidgetHost.qml     background 层 widget surface（自研桌面组件，不参与视差）
-│   ├── DepthClockWidget.qml    自研时钟组件
-│   ├── DepthForeground.qml     background 层前景 surface（straight alpha，点击穿透，参与视差）
-│   ├── DepthParallax.qml       per-output 视差控制器：轮询 niri、累计步数、输出偏移
-│   ├── DepthScrollMath.js      纯函数：减速曲线、margin、activeColumn、低通、透明度
+│   ├── DepthDaemon.qml         daemon：壁纸监听、生成任务队列、mask 广播、
+│   │                           settings 弹窗宿主、background widget 注册表
+│   ├── DepthWallpaper.qml      `:wallpaper` surface：壁纸 + 画布平移（刚体）
+│   ├── DepthBackgroundWidgetHost.qml  `:widgets` surface：OpacityMask(invert) 擦 widget
+│   ├── DepthWorkspaceTracker.qml     per-output 工作区追踪（Connections NiriService 信号）
+│   ├── DepthScrollMath.js      纯函数：两轴 steps → 单一指数偏移曲线
+│   ├── DepthBackgroundWidgetRegistry.qml  widget 类型注册表（configSchema / componentUrl）
+│   ├── DepthIpcCommands.qml    IPC 命令实现（status / settings / …）
 │   ├── DepthStatusWidget.qml   desktop：状态卡片
-│   ├── DepthSettings.qml       settings：阈值、羽化、视差、overview、动作按钮
-│   └── StartupCheck.qml        校验引擎二进制是否存在
-│
-├── test/
-│   └── depthscrollmath.test.js `node test/…`，DepthScrollMath 的单元测试
+│   ├── DepthSettings.qml       settings 内联面板：只有 preview + hover 三按钮
+│   ├── DepthSettingsPane.qml   弹窗主体：画廊 240 | stage | 检查器 328（三栏）
+│   ├── DepthStudioGallery.qml  画廊：每块输出一张实况缩略卡，点选切换 stage
+│   ├── DepthStudioStage.qml    预览台：16:9 实况 + 遮罩/原图分段 + 构图辅助线 + 工具行
+│   ├── DepthPaneDepth.qml      景深页：阈值 / 羽化（studio 风格细轨道滑杆）
+│   ├── DepthPaneParallax.qml   视差页：跟随工作区开关
+│   ├── DepthPaneWidgets.qml    组件页：条目 chip + schema 表单
+│   ├── DepthPaneReference.qml  参考页：IPC / 使用指南 / 关于
+│   ├── DepthRange.qml          细轨道滑杆（含 pluginData 读写契约）
+│   ├── DepthSwitch.qml         38×23 开关（同一契约）
+│   ├── DepthGroup.qml / DepthNote.qml   分组标题与说明块
+│   ├── DepthSelect.qml / DepthField.qml 内联下拉与文本框
+│   ├── DepthSchemaForm.qml     configSchema → studio 控件（字体预设=风格卡片，颜色=色板条）
+│   ├── DepthStudioTokens.js    配色 / 字号 / 圆角 token（单一来源）
+│   ├── DepthPreviewSource.qml  预览的数据源：屏幕 + 壁纸/mask/palette + entries
+│   ├── DepthSettingsPopup.qml  overlay 层 PanelWindow：scrim + studio 顶栏 + 卡片
+│   ├── DesktopPreview.qml      屏幕坐标系预览（壁纸 / 遮罩 / 小组件位置）
+│   ├── StartupCheck.qml        校验引擎二进制是否存在
+│   ├── DepthAutoColor.js       本地亮度采样 / 自动配色纯函数
+│   ├── builtins/               内置 widget（时钟 / 格言 / 日历）
+│   └── widgets/                vendored 设置控件 + DepthIconButton（qmldir 目录导入）
 │
 ├── engine/                     Rust 侧
-│   ├── Cargo.toml
 │   └── src/
 │       ├── main.rs             CLI 分发（status / setup / analyze / clear-cache）
 │       ├── config.rs           路径、模型指纹、pipeline 版本与常量
 │       ├── protocol.rs         与 QML 交换的 JSON 结构
 │       ├── cache.rs            BLAKE3 三级缓存、原子写入、LRU 裁剪
-│       ├── imageops.rs         积分图 box_mean、guided filter、smoothstep
+│       ├── imageops.rs         积分图 box_mean、guided filter、smoothstep、LA8 编码
 │       ├── depth.rs            ONNX Runtime 推理与归一化
 │       ├── model.rs            模型下载与 SHA-256 校验
-│       └── pipeline.rs         端到端编排：深度 → 精修 → 拆图
+│       ├── palette.rs          逐输出调色板（亮度网格）生成
+│       └── pipeline.rs         端到端编排：深度 → 精修 → mask
 │
-├── tools/
-│   ├── make-preview.py         浏览器内的分层预览，免重启 shell 检查效果
-│   ├── bench.py                性能回归
-│   ├── verify-all.sh           整套回归（静态检查 + 引擎 + 三个实时验证）
-│   ├── verify-parallax.py      视差像素验证：四假设判别 + 背景比例扫描
-│   ├── verify-navigation.py    真实导航往返验证
-│   └── on-clear-workspace.sh   把屏幕走空再跑命令（screenshot-screen 会挪焦点）
-│
+├── test/                       node --test（depthscrollmath / autocolor / colorutils）
+├── tools/                      bench.py / make-preview.py / verify-all.sh /
+│                               on-clear-workspace.sh
 └── docs/
     ├── depthscape.md           本文件
-    └── reference/
-        └── noctalia-wallpaper-depth.md   参考项目对照分析
+    ├── settings.md             设置页（内联预览 + 弹窗）与按钮状态机
+    ├── background-widget-authoring.md   widget 类型开发指南
+    ├── refactor-notes.md       重构流水账
+    └── reference/              参考项目对照分析
 ```
 
 运行期产物（不在仓库内）：
 
 ```text
 $XDG_DATA_HOME/depthscape/
-├── models/depth-anything-v2-small/model.onnx
+├── models/depth-anything-v2-small/model.onnx      + .verified 边车
 ├── cache/depth/       *.dsc       模型输出，f32，推理分辨率
 ├── cache/refined/     *.dsr       精修深度，u16，精修分辨率
-├── cache/split/       *-fg.png    主体，RGBA straight alpha
-│                      *-bg.png    背景，RGB 不透明
-├── widgets.json                   桌面 widget 布局（绕开 savePluginData）
+├── cache/masks/       *.png       单张 LA8 遮挡 mask，原分辨率（保留 32 份）
+├── cache/palettes/    *.json      逐输出亮度网格（widget 自动配色用）
+├── widgets.json                   background widget 布局（绕开 savePluginData）
 └── runtime/generate.lock
 ```
 
-> 后续版本新增的能力（视差、Shader）应扩展 `qml/DepthForeground.qml` 与 `imageops.rs`，
-> 而不是引入新的顶层目录。视差新增的 `DepthParallax.qml` / `DepthScrollMath.js`
-> 都在 `qml/` 内，符合这条。
+> 新增 widget 类型不需要动 daemon：注册表 + `builtins/` 两个文件，schema 是 widget
+> 自己声明的。新增能力仍然优先扩展现有文件，不开顶层新目录。
 
 ---
 
@@ -1007,15 +1080,19 @@ niri 导航事件
 
 ## 12. 多显示器设计
 
+> `split` 一项已改成 `mask`；`parallaxState` 由 `DepthWorkspaceTracker` 持有
+> （每输出一个）。**`settings` 仍是全局单值**——threshold / feather /
+> effectEnabled / modelType 全输出共用，这是目前唯一没做成逐输出的部分。
+
 每块屏幕独立维护：
 
 ```text
 DisplayState
 ├── wallpaper
 ├── depthMap
-├── split
+├── mask
 ├── parallaxState
-└── settings
+└── palette
 ```
 
 示例：
@@ -1064,7 +1141,7 @@ Local Cache
 ```text
 Wallpaper / Background 层
    ↓
-Desktop Widgets          ← Depthscape 自研，与主体同层，按 map 顺序被压
+Background Widgets       ← Depthscape 自研，与主体同层，按 map 顺序被压
    ↓
 Foreground Subject       ← 最后 map，压在最上
    ↓
@@ -1300,7 +1377,7 @@ mask: Region {}          // 空输入区域 = 完全点击穿透
 | `-fg.png` | **straight-alpha** RGBA | 主体原色 + 覆盖度在 alpha 通道 |
 | `-bg.png` | RGB（不透明） | 同一场景，主体区域被**模糊填充** |
 
-`DepthBackground` 画后者、`DepthWidgetHost` 画中间的 widget、
+`DepthBackground` 画后者、`DepthBackgroundWidgetHost` 画中间的 widget、
 `DepthForeground` 画前者，三层都在 `background` 层按 map 顺序叠。
 
 #### 两个必须遵守的约定

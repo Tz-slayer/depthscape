@@ -1,0 +1,31 @@
+# EditorConfig, https://editorconfig.org — respected by most editors out of box.
+#
+# Deliberate choices:
+#   * 4-space indent for QML and Rust, matching the existing codebase style.
+#   * 2-space indent for JSON and YAML, the ecosystem norm.
+#   * LF endings everywhere (this is a Linux-shell plugin; CRLF is a bug).
+#   * No trailing whitespace, always a final newline.
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{json,yml,yaml}]
+indent_size = 2
+
+[*.md]
+# Markdown uses trailing double-space for hard breaks in some places.
+trim_trailing_whitespace = false
+indent_size = 2
+
+[*.{rs,qml,js}]
+indent_size = 4
+
+[tools/*.sh]
+indent_style = tab

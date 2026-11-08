@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.21)
+project(DepthscapeSpatialAssets LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs)
+add_executable(depthscape-spatial-assets main.cpp)
+target_link_libraries(depthscape-spatial-assets PRIVATE ${OpenCV_LIBS})
+target_include_directories(depthscape-spatial-assets PRIVATE ${OpenCV_INCLUDE_DIRS})
