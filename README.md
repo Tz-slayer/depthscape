@@ -1,6 +1,6 @@
 # 🌌 Depthscape
 
-> Depth-aware occlusion and interactive 3D spatial wallpapers for **Dux Modular Shell (DMS)** on Wayland (Niri).
+> Depth-aware occlusion and interactive 3D spatial wallpapers for **Dux Shell (dux)** on Wayland (Niri).
 
 Depthscape estimates wallpaper depth locally to place desktop background widgets behind wallpaper subjects (iOS-style depth effect), and provides an interactive 3D spatial wallpaper mode that orbits with pointer motion.
 
@@ -10,12 +10,12 @@ Depthscape estimates wallpaper depth locally to place desktop background widgets
 ![Depth Occlusion in action](assets/screenshot.png)
 
 ### 🧊 Spatial 3D Wallpaper
-<video src="assets/screenrecord.mp4" controls width="100%"></video>
+![Spatial 3D Wallpaper in action](assets/screenrecord.gif)
 
 ---
 
 > [!WARNING]
-> Desktop widget occlusion requires the background layer feature introduced in [dux-shell PR #4162](https://github.com/duxlabs-dev/dux-shell/pull/4162) (or DMS builds incorporating this branch). Standard DMS releases without background layer support will display widgets without occlusion.
+> Desktop widget occlusion requires the background layer feature introduced in [dux-shell PR #4162](https://github.com/duxlabs-dev/dux-shell/pull/4162) (or dux-shell builds incorporating this branch). Standard dux-shell releases without background layer support will display widgets without occlusion.
 
 ---
 
@@ -30,7 +30,7 @@ Depthscape estimates wallpaper depth locally to place desktop background widgets
 
 ## 📋 Requirements
 
-- **Dux Modular Shell (DMS)** 2.0+ (with [PR #4162](https://github.com/duxlabs-dev/dux-shell/pull/4162) desktop widget background layer support)
+- **Dux Shell (dux-shell)** 2.0+ (with [PR #4162](https://github.com/duxlabs-dev/dux-shell/pull/4162) desktop widget background layer support)
 - **Niri** compositor (25.05+)
 - **Rust & Cargo** (to compile the local depth engine)
 - **Qt Quick3D** (for the 3D spatial mesh effect)
@@ -54,7 +54,7 @@ layer-rule {
 
 ### 1. 📦 Install Plugin
 
-Link Depthscape into your DMS plugins directory:
+Link Depthscape into your dux plugins directory:
 
 ```bash
 ln -s "$(pwd)" ~/.config/dms/plugins/depthscape
@@ -73,7 +73,7 @@ cd engine && cargo build --release
 
 ### 3. 🎛️ Configure & Download Model
 
-Open **DMS Settings → Plugins → Depthscape**:
+Open **Dux Settings → Plugins → Depthscape**:
 
 1. Select your preferred depth model (e.g. **Depth Anything V2 Small**) and click **Download Model**.
 2. Turn on **Enable Depth Effect** to occlude desktop widgets.
@@ -83,7 +83,7 @@ Open **DMS Settings → Plugins → Depthscape**:
 
 ## 💻 Useful Commands
 
-All features can be queried or triggered via DMS IPC:
+All features can be queried or triggered via dux IPC:
 
 ```bash
 # Re-analyze current wallpaper(s)
