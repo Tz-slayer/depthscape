@@ -33,6 +33,9 @@ pub struct AnalyzeRequest {
     /// Foreground model used for the spatial matte.
     pub spatial_model: &'static crate::config::ModelDescriptor,
     pub model: &'static crate::config::ModelDescriptor,
+    /// Long-edge cap, in pixels, applied to the decoded wallpaper before any
+    /// tier runs. The daemon passes the largest device resolution it has.
+    pub max_dimension: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -161,28 +164,43 @@ pub fn analyze(paths: &Paths, request: &AnalyzeRequest) -> Result<AnalyzeOutcome
 
     let stage = Instant::now();
     let wallpaper_hash = cache::hash_file(&request.wallpaper)?;
-    let entry = CacheEntry::resolve_with_fingerprint(
-        paths,
-        &wallpaper_hash,
-        request.model.fingerprint,
-        threshold,
-        feather,
-    );
     timings.hash_ms = stage.elapsed().as_millis();
 
     // Dimensions come from the file header alone. A full decode of a 5K
     // wallpaper costs ~60 ms, and only the pixel-level tiers below need it —
     // which is exactly when no mask is cached.
-    let (source_width, source_height) = image::ImageReader::open(&request.wallpaper)
+    let stage = Instant::now();
+    let (file_width, file_height) = image::ImageReader::open(&request.wallpaper)
         .with_context(|| format!("cannot open {}", request.wallpaper.display()))?
         .with_guessed_format()
         .with_context(|| format!("cannot identify format of {}", request.wallpaper.display()))?
         .into_dimensions()
         .with_context(|| format!("cannot read {}", request.wallpaper.display()))?;
-    if source_width == 0 || source_height == 0 {
+    if file_width == 0 || file_height == 0 {
         bail!("wallpaper has invalid dimensions");
     }
+    // Cap the source once, here. Every tier below reads this image, so depth,
+    // refinement, mask, palette and the spatial layers all end up proportional
+    // to what a display can show rather than to the file's native resolution.
+    let (source_width, source_height) =
+        imageops::cap_to_dimension(file_width, file_height, request.max_dimension);
+    // The reduced image is a different artefact from the full-resolution one,
+    // so it needs its own cache namespace; the wallpaper hash stays a prefix so
+    // retention by wallpaper keeps working.
+    let cache_hash = if (source_width, source_height) == (file_width, file_height) {
+        wallpaper_hash.clone()
+    } else {
+        format!("{wallpaper_hash}-c{}", source_width.max(source_height))
+    };
     timings.decode_ms = stage.elapsed().as_millis();
+
+    let entry = CacheEntry::resolve_with_fingerprint(
+        paths,
+        &cache_hash,
+        request.model.fingerprint,
+        threshold,
+        feather,
+    );
 
     let (model_width, model_height) = match request.model.kind {
         crate::config::ModelKind::DepthAnything | crate::config::ModelKind::DepthAnythingV3 => {
@@ -217,7 +235,7 @@ pub fn analyze(paths: &Paths, request: &AnalyzeRequest) -> Result<AnalyzeOutcome
 
     let spatial_entry = cache::SpatialCacheEntry::resolve(
         paths,
-        &cache::depth_key_with_fingerprint(&wallpaper_hash, request.model.fingerprint),
+        &cache::depth_key_with_fingerprint(&cache_hash, request.model.fingerprint),
         request.spatial_model.fingerprint,
     );
     let cached_warning = fs::read_to_string(&spatial_entry.complete_path)
@@ -225,7 +243,7 @@ pub fn analyze(paths: &Paths, request: &AnalyzeRequest) -> Result<AnalyzeOutcome
         .and_then(|value| value.strip_prefix("warning\n").map(str::to_owned));
     let has_transient_warning = is_isnet_fallback_warning(cached_warning.as_deref());
     let model_ready = has_transient_warning
-        && model::state(paths, &crate::config::SPATIAL_ISNET_ANIME)
+        && model::state(paths, request.spatial_model)
             .is_ok_and(|state| state == model::ModelState::Ready);
     let marker_age = fs::metadata(&spatial_entry.complete_path)
         .ok()
@@ -254,7 +272,12 @@ pub fn analyze(paths: &Paths, request: &AnalyzeRequest) -> Result<AnalyzeOutcome
             Some(cached) => (cached, true),
             None => {
                 let resized = image::imageops::resize(
-                    ensure_source(&mut source_rgb, &mut timings, &request.wallpaper)?,
+                    ensure_source(
+                        &mut source_rgb,
+                        &mut timings,
+                        &request.wallpaper,
+                        (source_width, source_height),
+                    )?,
                     model_width,
                     model_height,
                     // Bicubic, matching the reference implementation: this is the
@@ -289,7 +312,12 @@ pub fn analyze(paths: &Paths, request: &AnalyzeRequest) -> Result<AnalyzeOutcome
             Some(cached) => (cached, true),
             None => {
                 let computed = refine_at_resolution(
-                    ensure_source(&mut source_rgb, &mut timings, &request.wallpaper)?,
+                    ensure_source(
+                        &mut source_rgb,
+                        &mut timings,
+                        &request.wallpaper,
+                        (source_width, source_height),
+                    )?,
                     &depth,
                     model_width,
                     model_height,
@@ -379,7 +407,12 @@ pub fn analyze(paths: &Paths, request: &AnalyzeRequest) -> Result<AnalyzeOutcome
                 if spatial_entry.complete_path.exists() {
                     fs::remove_file(&spatial_entry.complete_path)?;
                 }
-                let source = ensure_source(&mut source_rgb, &mut timings, &request.wallpaper)?;
+                let source = ensure_source(
+                    &mut source_rgb,
+                    &mut timings,
+                    &request.wallpaper,
+                    (source_width, source_height),
+                )?;
                 let spatial_depth = imageops::resize_cubic(
                     &depth,
                     model_width,
@@ -398,6 +431,7 @@ pub fn analyze(paths: &Paths, request: &AnalyzeRequest) -> Result<AnalyzeOutcome
                 cache::atomic_write(&spatial_entry.depth_path, &prepared.depth)?;
                 cache::atomic_write(&spatial_entry.matte_path, &prepared.matte)?;
                 cache::atomic_write(&spatial_entry.influence_path, &prepared.influence)?;
+                cache::atomic_write(&spatial_entry.photo_path, &prepared.photo)?;
                 let marker = match &prepared.warning {
                     Some(warning) => format!("warning\n{warning}"),
                     None => "complete\n".to_string(),
@@ -432,7 +466,12 @@ pub fn analyze(paths: &Paths, request: &AnalyzeRequest) -> Result<AnalyzeOutcome
     if !palette_cache_hit {
         let decoded_before = timings.decode_ms;
         let stage = Instant::now();
-        let rgb = ensure_source(&mut source_rgb, &mut timings, &request.wallpaper)?;
+        let rgb = ensure_source(
+            &mut source_rgb,
+            &mut timings,
+            &request.wallpaper,
+            (source_width, source_height),
+        )?;
         let extracted = palette::extract(&DynamicImage::ImageRgb8(rgb.clone()));
         palette::write(&palette_path, &extracted)?;
         timings.palette_ms = stage.elapsed().as_millis() - (timings.decode_ms - decoded_before);
@@ -496,6 +535,7 @@ fn ensure_source<'a>(
     slot: &'a mut Option<RgbImage>,
     timings: &mut Timings,
     wallpaper: &Path,
+    target: (u32, u32),
 ) -> Result<&'a RgbImage> {
     if slot.is_none() {
         let stage = Instant::now();
@@ -505,7 +545,19 @@ fn ensure_source<'a>(
             .with_context(|| format!("cannot identify format of {}", wallpaper.display()))?
             .decode()
             .with_context(|| format!("cannot decode {}", wallpaper.display()))?;
-        *slot = Some(decoded.to_rgb8());
+        let rgb = decoded.to_rgb8();
+        // Downsample here rather than per tier: this is the single image every
+        // stage consumes, so the reduction happens exactly once.
+        *slot = Some(if rgb.dimensions() == target {
+            rgb
+        } else {
+            image::imageops::resize(
+                &rgb,
+                target.0,
+                target.1,
+                image::imageops::FilterType::CatmullRom,
+            )
+        });
         timings.decode_ms += stage.elapsed().as_millis();
     }
     Ok(slot.as_ref().expect("filled just above"))
@@ -706,11 +758,11 @@ mod tests {
 
         let mut slot = None;
         let mut timings = Timings::default();
-        ensure_source(&mut slot, &mut timings, &path).unwrap();
+        ensure_source(&mut slot, &mut timings, &path, (4, 3)).unwrap();
 
         // Deleting the file proves the second call never goes back to disk.
         fs::remove_file(&path).unwrap();
-        let again = ensure_source(&mut slot, &mut timings, &path).unwrap();
+        let again = ensure_source(&mut slot, &mut timings, &path, (4, 3)).unwrap();
         assert_eq!(again.dimensions(), (4, 3));
         assert_eq!(again.as_raw().len(), 4 * 3 * 3);
 

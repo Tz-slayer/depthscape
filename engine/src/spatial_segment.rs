@@ -35,7 +35,7 @@ pub fn predict(
     }
     let path = model::model_path(paths, descriptor);
     match descriptor.kind {
-        ModelKind::SpatialIsNet => predict_isnet(&path, photo, width, height),
+        ModelKind::SpatialIsNet => predict_isnet(&path, descriptor, photo, width, height),
         ModelKind::BiRefNet => predict_birefnet(&path, descriptor.kind, photo, width, height),
         _ => bail!(
             "{} is a depth model, not a spatial foreground model",
@@ -46,14 +46,15 @@ pub fn predict(
 
 fn predict_isnet(
     path: &std::path::Path,
+    descriptor: &crate::config::ModelDescriptor,
     photo: &RgbImage,
     width: u32,
     height: u32,
 ) -> Result<GrayImage> {
     let mut session = Session::builder()
-        .map_err(|e| anyhow::anyhow!("cannot create IS-Net Anime session: {e}"))?
+        .map_err(|e| anyhow::anyhow!("cannot create IS-Net session: {e}"))?
         .with_intra_threads(4)
-        .map_err(|e| anyhow::anyhow!("cannot configure IS-Net Anime session: {e}"))?
+        .map_err(|e| anyhow::anyhow!("cannot configure IS-Net session: {e}"))?
         .commit_from_file(path)
         .map_err(|e| {
             anyhow::anyhow!(
@@ -63,8 +64,6 @@ fn predict_isnet(
         })?;
     if session.inputs().len() != 1
         || session.outputs().len() != 1
-        || session.inputs()[0].name() != "img"
-        || session.outputs()[0].name() != "mask"
         || session.inputs()[0].dtype().tensor_type() != Some(ort::value::TensorElementType::Float32)
         || session.inputs()[0]
             .dtype()
@@ -72,11 +71,25 @@ fn predict_isnet(
             .map(|shape| &shape[..])
             != Some(&[1, 3, 1024, 1024][..])
     {
-        bail!("IS-Net Anime does not match its pinned input/output contract");
+        bail!("IS-Net does not match its pinned input/output contract");
     }
-    // Match rembg's DisSession preprocessing for isnet-anime: resize to a
-    // square with Lanczos, scale by the image-wide maximum channel value,
-    // then subtract ImageNet RGB means (standard deviation is 1).
+    let input_name = session.inputs()[0].name();
+    let output_name = session.outputs()[0].name();
+    if (input_name != "img" && input_name != "input_image")
+        || (output_name != "mask" && output_name != "output_image")
+    {
+        bail!("IS-Net unexpected input/output names: in={input_name}, out={output_name}");
+    }
+
+    // Match rembg's DisSession preprocessing: resize to a square with Lanczos,
+    // scale by the image-wide maximum channel value, then subtract means
+    // (ImageNet RGB means for isnet-anime, 0.5 for general-use isnet).
+    let is_anime = descriptor.id.contains("anime");
+    let means = if is_anime {
+        [0.485, 0.456, 0.406]
+    } else {
+        [0.5, 0.5, 0.5]
+    };
     let resized = image::imageops::resize(photo, SIDE, SIDE, image::imageops::FilterType::Lanczos3);
     let max_pixel = resized
         .pixels()
@@ -84,7 +97,6 @@ fn predict_isnet(
         .max()
         .unwrap_or(1)
         .max(1) as f32;
-    let means = [0.485, 0.456, 0.406];
     let count = (SIDE * SIDE) as usize;
     let mut chw = vec![0.0f32; count * 3];
     for (index, pixel) in resized.pixels().enumerate() {
@@ -94,24 +106,24 @@ fn predict_isnet(
     }
     let tensor = Array4::from_shape_vec((1, 3, SIDE as usize, SIDE as usize), chw)?;
     let input = TensorRef::from_array_view(&tensor)
-        .map_err(|e| anyhow::anyhow!("cannot prepare IS-Net Anime input: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("cannot prepare IS-Net input: {e}"))?;
     let options = RunOptions::new()
-        .map_err(|e| anyhow::anyhow!("cannot configure IS-Net Anime outputs: {e}"))?
-        .with_outputs(OutputSelector::no_default().with("mask"));
+        .map_err(|e| anyhow::anyhow!("cannot configure IS-Net outputs: {e}"))?
+        .with_outputs(OutputSelector::no_default().with(output_name));
     let outputs = session
         .run_with_options(ort::inputs![input], &options)
-        .map_err(|e| anyhow::anyhow!("IS-Net Anime inference failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("IS-Net inference failed: {e}"))?;
     if outputs.len() != 1 {
         bail!(
-            "IS-Net Anime returned {} selected outputs, expected 1",
+            "IS-Net returned {} selected outputs, expected 1",
             outputs.len()
         );
     }
     let field = outputs[0]
         .try_extract_array::<f32>()
-        .map_err(|e| anyhow::anyhow!("invalid IS-Net Anime output: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("invalid IS-Net output: {e}"))?;
     if field.shape() != [1, 1, SIDE as usize, SIDE as usize] {
-        bail!("unexpected IS-Net Anime output shape: {:?}", field.shape());
+        bail!("unexpected IS-Net output shape: {:?}", field.shape());
     }
     let (min, max) = field
         .iter()
@@ -123,7 +135,7 @@ fn predict_isnet(
             }
         });
     if !min.is_finite() || !max.is_finite() || max - min < 0.00001 {
-        bail!("IS-Net Anime returned an invalid foreground confidence map");
+        bail!("IS-Net returned an invalid foreground confidence map");
     }
     let pixels: Vec<u8> = field
         .iter()

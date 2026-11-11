@@ -22,23 +22,18 @@ PluginSettings {
 
     property var daemon: null
     property int daemonLookupTries: 0
-    property bool confirmPurge: false
     property bool buildingEngine: false
     property bool downloadingEngine: (root.daemon && root.daemon.downloadingEngine) || root._localDownloadingEngine
     property bool _localDownloadingEngine: false
     property string buildOutput: ""
     property string chosenScreen: ""
 
-    readonly property string selectedFgStatusId: root.currentSpatialModel === "isnet-anime"
-        ? "spatial-isnet-anime" : root.currentSpatialModel
-
-    readonly property bool foregroundMissing: {
-        if (!spatialToggle.value)
-            return false;
+    readonly property bool fgModelReady: {
         const list = root.foregroundModels || [];
-        for (let i = 0; i < list.length; i++)
+        for (let i = 0; i < list.length; i++) {
             if (list[i].id === root.selectedFgStatusId)
-                return list[i].ready !== true;
+                return list[i].ready === true;
+        }
         return false;
     }
 
@@ -69,12 +64,6 @@ PluginSettings {
         }
     }
 
-    Timer {
-        id: purgeConfirmTimer
-        interval: 5000
-        onTriggered: root.confirmPurge = false
-    }
-
     Process {
         id: buildProcess
 
@@ -92,7 +81,7 @@ PluginSettings {
                 root.buildOutput = "";
                 root.saveValue("action", "rescanEngine");
             } else if (root.buildOutput === "") {
-                root.buildOutput = I18n.tr("Build failed (exit %1)").arg(exitCode);
+                root.buildOutput = I18n.trFor("depthscape", "Build failed (exit %1)").arg(exitCode);
             }
         }
     }
@@ -123,7 +112,7 @@ PluginSettings {
                 root.buildOutput = "";
                 root.saveValue("action", "rescanEngine");
             } else if (root.buildOutput === "") {
-                root.buildOutput = I18n.tr("Download failed (exit %1)").arg(exitCode);
+                root.buildOutput = I18n.trFor("depthscape", "Download failed (exit %1)").arg(exitCode);
             }
         }
     }
@@ -143,6 +132,19 @@ PluginSettings {
 
     // Displays
     readonly property var screens: Quickshell.screens ?? []
+
+    /// Whether DMS is replacing wallpapers on a timer, globally or per screen.
+    readonly property bool wallpaperCyclingActive: {
+        if (SessionData.perMonitorWallpaper) {
+            for (const screen of root.screens) {
+                const settings = SessionData.getMonitorCyclingSettings(screen.name);
+                if (settings && settings.enabled === true)
+                    return true;
+            }
+            return false;
+        }
+        return SessionData.wallpaperCyclingEnabled === true;
+    }
 
     readonly property string defaultScreenName: {
         const focused = (typeof NiriService !== "undefined" && NiriService) ? NiriService.currentOutput : "";
@@ -201,106 +203,36 @@ PluginSettings {
             spatialToggle.loadValue();
         if (spatialTravelSlider && spatialTravelSlider.loadValue)
             spatialTravelSlider.loadValue();
-        if (spatialModelPicker && spatialModelPicker.loadValue)
-            spatialModelPicker.loadValue();
-        if (modelPicker && modelPicker.loadValue)
-            modelPicker.loadValue();
     }
 
     Component.onCompleted: {
         if (!root.lookupDaemon())
             daemonLookup.running = true;
         Qt.callLater(root.repairScreenChoice);
-        Qt.callLater(root.syncModelValue);
-        Qt.callLater(root.syncSpatialModelValue);
     }
 
     // Models & Daemon state
     readonly property bool daemonFound: root.daemon !== null
     readonly property bool engineFound: root.daemonFound && root.daemon.enginePath !== ""
-    readonly property bool modelReady: root.daemonFound && root.daemon.modelReady === true
+    readonly property bool modelReady: {
+        const list = root.availableModels || [];
+        for (let i = 0; i < list.length; i++) {
+            if (list[i].id === root.currentModelType)
+                return list[i].ready === true;
+        }
+        return false;
+    }
     readonly property bool modelBusy: root.daemonFound && root.daemon.modelBusy === true
+    readonly property string engineProblem: root.daemonFound ? (root.daemon.engineProblem || "") : ""
+    /// Everything the engine card can act on. Ready means the card stays hidden.
+    readonly property bool engineNeedsAttention: !root.daemonFound || !root.engineFound
+        || root.modelBusy || !root.modelReady || !root.fgModelReady || root.engineProblem !== ""
     readonly property var availableModels: root.daemonFound ? root.daemon.availableModels : []
     readonly property var foregroundModels: root.daemonFound ? root.daemon.foregroundModels : []
 
-    readonly property var modelIds: ["small", "base", "large"]
-    readonly property var modelLabels: [
-        "Depth Anything V2 Small (99MB)",
-        "Depth Anything V2 Base (389MB)",
-        "Depth Anything V2 Large (1.34GB)"
-    ]
-
-    readonly property var modelIcons: {
-        const out = [];
-        const list = root.availableModels || [];
-        for (let i = 0; i < root.modelIds.length; i++) {
-            let ready = false;
-            for (let j = 0; j < list.length; j++) {
-                if (list[j].id === root.modelIds[i]) {
-                    ready = list[j].ready === true;
-                    break;
-                }
-            }
-            out.push(ready ? "check_circle" : "radio_button_unchecked");
-        }
-        return out;
-    }
-
-    property string currentModelType: "small"
-
-    Binding {
-        target: root
-        property: "currentModelType"
-        value: modelPicker ? modelPicker.value : "small"
-    }
-
-    function syncModelValue() {
-        const stored = root.loadValue("modelType", "small");
-        const valid = root.modelIds.indexOf(stored) >= 0 ? stored : "small";
-        root.currentModelType = valid;
-        if (modelPicker && modelPicker.value !== valid)
-            modelPicker.commitValue(valid);
-    }
-
-    readonly property var fgModelIds: ["isnet-anime", "birefnet-lite", "birefnet"]
-    readonly property var fgStatusIds: ["spatial-isnet-anime", "birefnet-lite", "birefnet"]
-    readonly property var fgModelLabels: [
-        "IS-Net Anime (168 MiB)",
-        "BiRefNet Lite (224MB)",
-        "BiRefNet General (973MB)"
-    ]
-
-    readonly property var fgModelIcons: {
-        const out = [];
-        const list = root.foregroundModels || [];
-        for (let i = 0; i < root.fgStatusIds.length; i++) {
-            let ready = false;
-            for (let j = 0; j < list.length; j++) {
-                if (list[j].id === root.fgStatusIds[i]) {
-                    ready = list[j].ready === true;
-                    break;
-                }
-            }
-            out.push(ready ? "check_circle" : "radio_button_unchecked");
-        }
-        return out;
-    }
-
-    property string currentSpatialModel: "isnet-anime"
-
-    Binding {
-        target: root
-        property: "currentSpatialModel"
-        value: spatialModelPicker ? spatialModelPicker.value : "isnet-anime"
-    }
-
-    function syncSpatialModelValue() {
-        const stored = root.loadValue("spatialModel", "isnet-anime");
-        const valid = root.fgModelIds.indexOf(stored) >= 0 ? stored : "isnet-anime";
-        root.currentSpatialModel = valid;
-        if (spatialModelPicker && spatialModelPicker.value !== valid)
-            spatialModelPicker.commitValue(valid);
-    }
+    // Fixed model pair, matching what the daemon provisions on first run.
+    readonly property string currentModelType: "small"
+    readonly property string selectedFgStatusId: "spatial-isnet-anime"
 
     readonly property string pluginRoot: Qt.resolvedUrl("..").toString()
         .replace(/^file:\/\//, "").replace(/\/$/, "")
@@ -309,22 +241,31 @@ PluginSettings {
 
     readonly property string statusText: {
         if (root.downloadingEngine)
-            return I18n.tr("Downloading prebuilt engine... ") + root.buildOutput;
+            return root.buildOutput !== "" ? I18n.trFor("depthscape", "Downloading prebuilt engine... %1").arg(root.buildOutput) : I18n.trFor("depthscape", "Downloading prebuilt engine...");
         if (root.buildingEngine)
-            return I18n.tr("Building engine... ") + root.buildOutput;
+            return root.buildOutput !== "" ? I18n.trFor("depthscape", "Building engine... %1").arg(root.buildOutput) : I18n.trFor("depthscape", "Building engine...");
         if (!root.daemonFound)
-            return I18n.tr("Plugin is starting. Reopen this page in a moment.");
+            return I18n.trFor("depthscape", "Plugin is starting. Reopen this page in a moment.");
         if (!root.engineFound) {
             if (root.buildOutput !== "")
                 return root.buildOutput;
-            return I18n.tr("Engine binary not found. Download prebuilt binary or press Build Engine.");
+            return I18n.trFor("depthscape", "Engine binary not found. Download prebuilt binary or press Build Engine.");
         }
-        if (root.modelBusy)
-            return I18n.tr("Working on ") + (root.daemon.installingModel || I18n.tr("model"));
+        if (root.modelBusy) {
+            const installing = root.daemon ? root.daemon.installingModel : "";
+            const removing = root.daemon ? root.daemon.removingModel : "";
+            const target = installing || removing;
+            const info = root.daemon && root.daemon.modelInfo ? root.daemon.modelInfo(target) : null;
+            const modelName = info ? info.name : (target || I18n.trFor("depthscape", "model"));
+            return I18n.trFor("depthscape", "Working on %1").arg(modelName);
+        }
+        if (!root.modelReady && !root.fgModelReady)
+            return I18n.trFor("depthscape", "Models not downloaded. Please select and download models.");
         if (!root.modelReady)
-            return I18n.tr("No model downloaded. Pick one above and press Download Model.");
-        return I18n.tr("Ready · ") + (root.daemon.currentModelInfo
-            ? root.daemon.currentModelInfo.name : root.daemon.modelType);
+            return I18n.trFor("depthscape", "Depth model not downloaded.");
+        if (!root.fgModelReady)
+            return I18n.trFor("depthscape", "Matting model not downloaded.");
+        return I18n.trFor("depthscape", "Ready · Depth model and matting model are ready.");
     }
 
     readonly property string statusIcon: root.downloadingEngine ? "hourglass_empty"
@@ -332,14 +273,14 @@ PluginSettings {
         : !root.daemonFound ? "hourglass_empty"
         : !root.engineFound ? "download"
         : root.modelBusy ? "hourglass_empty"
-        : root.modelReady ? "check_circle" : "download"
+        : (root.modelReady && root.fgModelReady) ? "check_circle" : "info"
 
     readonly property color statusColor: {
         if (!root.engineFound)
             return (root.buildOutput !== "" && !root.buildingEngine && !root.downloadingEngine) ? Theme.error : Theme.warning;
         if (root.modelBusy || root.buildingEngine || root.downloadingEngine)
             return Theme.warning;
-        if (!root.modelReady)
+        if (!root.modelReady || !root.fgModelReady)
             return Theme.warning;
         return Theme.primary;
     }
@@ -351,7 +292,7 @@ PluginSettings {
         visible: root.screens.length > 1
 
         SectionTitle {
-            text: I18n.tr("Display Configuration")
+            text: I18n.tr("Display")
             icon: "desktop_windows"
         }
 
@@ -360,17 +301,17 @@ PluginSettings {
         PluginDropdownRow {
             id: displayPicker
             settingKey: "targetScreen"
-            label: I18n.tr("Target Display")
+            label: I18n.tr("Display")
             defaultValue: root.defaultScreenName
             options: root.displayScreenNames
             optionValues: root.displayScreenNames
         }
     }
 
-    // Depth Occlusion
+    // Depth Wallpaper
     SettingsCard {
         SectionTitle {
-            text: I18n.tr("Depth Occlusion")
+            text: I18n.trFor("depthscape", "Depth Wallpaper")
             icon: "layers"
         }
 
@@ -379,41 +320,45 @@ PluginSettings {
         PluginToggleRow {
             id: effectToggle
             settingKey: root.settingKeyFor("effectEnabled")
-            label: I18n.tr("Enable Depth Effect")
+            label: I18n.trFor("depthscape", "Depth Wallpaper")
             defaultValue: true
         }
 
-        SettingDivider {}
+        SettingDivider {
+            visible: effectToggle.value
+        }
 
         PluginSliderRow {
             id: thresholdSlider
+            visible: effectToggle.value
             settingKey: root.settingKeyFor("threshold")
-            label: I18n.tr("Occlusion Threshold")
+            label: I18n.trFor("depthscape", "Occlusion Threshold")
             defaultValue: 30
             minimum: 1
             maximum: 99
             unit: "%"
-            enabled: effectToggle.value
         }
 
-        SettingDivider {}
+        SettingDivider {
+            visible: effectToggle.value
+        }
 
         PluginSliderRow {
             id: featherSlider
+            visible: effectToggle.value
             settingKey: root.settingKeyFor("feather")
-            label: I18n.tr("Edge Feather")
+            label: I18n.trFor("depthscape", "Edge Feather")
             defaultValue: 8
             minimum: 0
             maximum: 40
             unit: "%"
-            enabled: effectToggle.value
         }
     }
 
-    // Spatial 3D
+    // Spatial Wallpaper
     SettingsCard {
         SectionTitle {
-            text: I18n.tr("Spatial 3D")
+            text: I18n.trFor("depthscape", "Spatial Wallpaper")
             icon: "view_in_ar"
         }
 
@@ -422,23 +367,8 @@ PluginSettings {
         PluginToggleRow {
             id: spatialToggle
             settingKey: root.settingKeyFor("spatialEnabled")
-            label: I18n.tr("Spatial 3D Mesh Effect")
+            label: I18n.trFor("depthscape", "Spatial Wallpaper")
             defaultValue: false
-        }
-
-        SettingDivider {
-            visible: spatialToggle.value
-        }
-
-        PluginDropdownRow {
-            id: spatialModelPicker
-            visible: spatialToggle.value
-            settingKey: "spatialModel"
-            label: I18n.tr("Foreground Model")
-            defaultValue: "isnet-anime"
-            options: root.fgModelLabels
-            optionValues: root.fgModelIds
-            optionIcons: root.fgModelIcons
         }
 
         SettingDivider {
@@ -449,7 +379,7 @@ PluginSettings {
             id: spatialTravelSlider
             visible: spatialToggle.value
             settingKey: root.settingKeyFor("spatialTravel")
-            label: I18n.tr("Motion Amplitude")
+            label: I18n.trFor("depthscape", "Parallax Amplitude")
             defaultValue: 3
             minimum: 0
             maximum: 10
@@ -457,26 +387,21 @@ PluginSettings {
         }
     }
 
-    // AI Depth Model & Engine
+    // Engine recovery. The engine and both models are provisioned automatically,
+    // so in the normal case there is nothing to show and nothing to press -- the
+    // card is rendered only when something actually needs the user.
     SettingsCard {
+        visible: root.engineNeedsAttention
+
         SectionTitle {
-            text: I18n.tr("AI Depth Model")
-            icon: "psychology"
+            text: I18n.trFor("depthscape", "Engine")
+            icon: "memory"
         }
 
         SettingDivider {}
 
-        PluginDropdownRow {
-            id: modelPicker
-            settingKey: "modelType"
-            label: I18n.tr("Model Architecture")
-            defaultValue: "small"
-            options: root.modelLabels
-            optionValues: root.modelIds
-            optionIcons: root.modelIcons
-        }
-
-        SettingDivider {}
+        // Models are fixed now (Depth Anything V2 Small + IS-Net Anime) and are
+        // provisioned automatically on first run, so there is nothing to pick.
 
         // Status Card
         StyledRect {
@@ -521,9 +446,9 @@ PluginSettings {
             spacing: Theme.spacingS
 
             DButton {
-                text: I18n.tr("Download Engine")
+                text: I18n.trFor("depthscape", "Download Engine")
                 iconName: "download"
-                tooltipText: I18n.tr("Download prebuilt binary from GitHub Releases (no Rust needed)")
+                tooltipText: I18n.trFor("depthscape", "Download prebuilt binary from GitHub Releases (no Rust needed)")
                 visible: !root.engineFound
                 busy: root.downloadingEngine
                 enabled: root.daemonFound && !root.downloadingEngine && !root.buildingEngine
@@ -531,7 +456,7 @@ PluginSettings {
             }
 
             DButton {
-                text: I18n.tr("Build Engine")
+                text: I18n.trFor("depthscape", "Build Engine")
                 iconName: "build"
                 tooltipText: root.engineCommand
                 visible: !root.engineFound
@@ -541,99 +466,25 @@ PluginSettings {
             }
 
             DButton {
-                text: I18n.tr("Re-check Engine")
+                text: I18n.trFor("depthscape", "Re-check Engine")
                 iconName: "refresh"
                 visible: !root.engineFound
                 enabled: root.daemonFound && !root.buildingEngine && !root.downloadingEngine
                 onClicked: root.saveValue("action", "rescanEngine")
             }
 
-            DButton {
-                text: root.modelReady ? I18n.tr("Re-download Model") : I18n.tr("Download Model")
-                iconName: "download"
-                tooltipText: I18n.tr("Downloads the selected model only when you press this button.")
-                busy: root.modelBusy
-                enabled: root.engineFound && !root.modelBusy
-                onClicked: root.saveValue("action", (root.modelReady ? "installForce:" : "install:") + root.currentModelType)
-            }
-
-            DButton {
-                text: I18n.tr("Regenerate Depth")
-                iconName: "refresh"
-                enabled: root.modelReady && !root.modelBusy
-                onClicked: root.saveValue("action", "generate")
-            }
-
-            DButton {
-                text: I18n.tr("Clear Cache")
-                iconName: "delete"
-                enabled: root.engineFound && !root.modelBusy
-                onClicked: root.saveValue("action", "clearCache")
-            }
-
-            DButton {
-                text: root.confirmPurge ? I18n.tr("Confirm Removal") : I18n.tr("Remove Model Data")
-                iconName: "delete_forever"
-                tooltipText: I18n.tr("Deletes every downloaded model and all generated data. Do this before uninstalling Depthscape.")
-                enabled: root.engineFound && !root.modelBusy
-                textColor: root.confirmPurge ? Theme.error : Theme.buttonText
-                backgroundColor: root.confirmPurge ? Theme.withAlpha(Theme.error, 0.12) : Theme.buttonBg
-                onClicked: {
-                    if (!root.confirmPurge) {
-                        root.confirmPurge = true;
-                        purgeConfirmTimer.restart();
-                        return;
-                    }
-                    root.confirmPurge = false;
-                    purgeConfirmTimer.stop();
-                    root.saveValue("action", "uninstall");
-                }
-            }
         }
+    }
 
-        // Spatial foreground fallback banner
-        StyledRect {
-            width: parent.width
-            height: fgNoticeRow.implicitHeight + (Theme.spacingM * 2)
-            radius: Theme.cornerRadiusS
-            color: Theme.withAlpha(Theme.warning, 0.08)
-            border.color: Theme.withAlpha(Theme.warning, 0.3)
-            border.width: 1
-            visible: root.foregroundMissing
-
-            Row {
-                id: fgNoticeRow
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                anchors.margins: Theme.spacingM
-                spacing: Theme.spacingM
-
-                DIcon {
-                    name: "info"
-                    size: 20
-                    color: Theme.warning
-                    anchors.verticalCenter: parent.verticalCenter
-                }
-
-                StyledText {
-                    width: parent.width - 20 - Theme.spacingM - fgDownloadBtn.width - Theme.spacingM
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: I18n.tr("Spatial foreground model not downloaded (depth-guided fallback is used).")
-                    font.pixelSize: Theme.fontSizeSmall
-                    color: Theme.surfaceText
-                    wrapMode: Text.WordWrap
-                }
-
-                DButton {
-                    id: fgDownloadBtn
-                    text: I18n.tr("Download")
-                    iconName: "download"
-                    anchors.verticalCenter: parent.verticalCenter
-                    enabled: root.engineFound && !root.modelBusy
-                    onClicked: root.saveValue("action", "install:" + root.selectedFgStatusId)
-                }
-            }
-        }
+    // Cached artefacts only cover the wallpaper currently displayed, so a timed
+    // wallpaper change always pays a fresh inference. Say it here rather than
+    // letting the blank window read as a bug.
+    StyledText {
+        visible: root.wallpaperCyclingActive
+        width: parent.width
+        text: I18n.trFor("depthscape", "Wallpaper cycling is on, so each new wallpaper is analysed from scratch: the depth effect briefly disappears after every change.")
+        font.pixelSize: Theme.fontSizeSmall
+        color: Theme.surfaceTextSecondary
+        wrapMode: Text.WordWrap
     }
 }

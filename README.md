@@ -23,7 +23,7 @@ Depthscape estimates wallpaper depth locally to place desktop background widgets
 
 - 🖼️ **Depth Occlusion**: Desktop background widgets sit naturally behind foreground wallpaper subjects.
 - 🧊 **Interactive Spatial 3D**: Real-time 3D depth mesh and camera orbit driven by mouse pointer movement.
-- 🧠 **Local & Offline Inference**: Powered by Depth Anything V2 (Small / Base / Large) and IS-Net Anime / BiRefNet. Models are downloaded **only on explicit user request**.
+- 🧠 **Local & Offline Inference**: Depth Anything V2 Small for depth and IS-Net Anime for matting, both running on-device. The engine and both models are provisioned automatically on first launch — no manual download.
 - 🖥️ **Per-Display Customization**: Independent controls for occlusion threshold, edge feathering, and spatial motion strength per monitor.
 
 ---
@@ -32,8 +32,9 @@ Depthscape estimates wallpaper depth locally to place desktop background widgets
 
 - **Dux Shell (dux-shell)** 2.0+ (with [PR #4162](https://github.com/duxlabs-dev/dux-shell/pull/4162) desktop widget background layer support)
 - **Niri** compositor (25.05+)
-- **Rust & Cargo** (to compile the local depth engine)
-- **Qt Quick3D** (for the 3D spatial mesh effect)
+- **curl**, used for the automatic engine and model download
+- *Optional*, only to build the engine yourself: **Rust & Cargo** and **OpenCV 5 development files**. OpenCV is linked statically, so it is **not** needed at runtime.
+- *Optional*: **Qt Quick3D development files** to build the native spatial mesh (`tools/build-spatial3d.sh`). Without it the spatial mode falls back to a lower-detail renderer.
 
 ---
 
@@ -48,6 +49,10 @@ layer-rule {
 }
 ```
 
+This rule keeps Depthscape's surfaces in the shared backdrop alongside the desktop
+widgets. When it is missing the plugin logs a warning and its surfaces are not placed
+in that shared context.
+
 ---
 
 ## 🚀 Quick Start
@@ -61,23 +66,47 @@ ln -s "$(pwd)" ~/.config/dms/plugins/depthscape
 dms restart
 ```
 
-### 2. 🛠️ Build the Engine
+If Depthscape is also installed through the plugin registry, remove that copy first — a managed install is updated with git, and a failed pull makes DMS re-clone into that path, replacing your link.
 
-Build the Rust depth engine:
+### 2. 🚀 First Launch
+
+There is nothing to install by hand. On first start Depthscape downloads the
+prebuilt engine and the two models it uses — Depth Anything V2 Small (~99 MB) and
+IS-Net Anime (~168 MB) — and reports progress with a toast. The engine is a single
+self-contained binary, so no system packages are needed.
+
+To build the engine yourself instead:
 
 ```bash
 cd engine && cargo build --release
+cp target/release/depthscape-engine ../bin/depthscape-engine
 ```
 
-*(You can also click **Build Engine** directly inside the Depthscape plugin settings page).*
+*(Requires OpenCV 5 development files; the engine links them statically. You can also use **Build Engine** in the plugin's Engine card, which only appears when something is missing.)*
 
-### 3. 🎛️ Configure & Download Model
+### 3. 🎛️ Configure
 
 Open **Dux Settings → Plugins → Depthscape**:
 
-1. Select your preferred depth model (e.g. **Depth Anything V2 Small**) and click **Download Model**.
-2. Turn on **Enable Depth Effect** to occlude desktop widgets.
-3. Turn on **Spatial 3D Mesh Effect** to enable interactive 3D pointer parallax.
+1. Turn on **Depth Wallpaper** to place desktop background widgets behind the wallpaper subject.
+2. Turn on **Spatial Wallpaper** to add pointer-driven 3D parallax.
+3. Adjust **Occlusion Threshold** and **Edge Feather** per display if the foreground split is not where you want it.
+
+---
+
+## 🗃️ What Gets Cached
+
+Only the wallpapers currently shown on some display are kept. When a wallpaper
+changes, the previous wallpaper's depth map, mask, palette and spatial layers are
+deleted, so memory and disk use stay bounded no matter how many wallpapers you try.
+
+The trade-off is deliberate: every switch re-runs inference. The occlusion effect
+reappears after roughly a second, and several seconds when the spatial layers are
+needed; during that window the wallpaper is shown without its depth effect. This
+also applies to wallpaper cycling, where every new image is analysed from scratch.
+
+Everything lives in `.data/` next to `plugin.json` (models, caches, runtime files),
+so uninstalling the plugin removes it all.
 
 ---
 

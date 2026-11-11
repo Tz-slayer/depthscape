@@ -249,10 +249,10 @@ pub fn model_path(paths: &Paths, descriptor: &ModelDescriptor) -> PathBuf {
     paths.model_for(descriptor)
 }
 
-#[derive(Default)]
-struct Removal {
-    files: usize,
-    bytes: u64,
+#[derive(Debug, Default, serde::Serialize)]
+pub struct Removal {
+    pub files: usize,
+    pub bytes: u64,
 }
 
 /// Recursively remove one of Depthscape's own subtrees.
@@ -315,6 +315,16 @@ pub fn uninstall(paths: &Paths) -> Result<UninstallReport> {
         removedBytes: state.bytes,
         removedRoot: removed_root,
     })
+}
+
+/// Remove a single model's files from disk.
+pub fn remove_model(paths: &Paths, descriptor: &ModelDescriptor) -> Result<Removal> {
+    let model_dir = paths.root().join(descriptor.directory);
+    let mut state = Removal::default();
+    if model_dir.is_dir() {
+        remove_tree(&model_dir, &mut state)?;
+    }
+    Ok(state)
 }
 
 #[cfg(test)]
@@ -466,6 +476,30 @@ mod tests {
         let report = uninstall(&Paths::new(&root)).unwrap();
         assert!(report.removedRoot);
         assert!(!root.exists());
+    }
+
+    #[test]
+    fn remove_model_removes_only_target_model() {
+        use crate::config::{Paths, MODEL_BASE, MODEL_SMALL};
+
+        let root =
+            std::env::temp_dir().join(format!("depthscape-remove-model-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let paths = Paths::new(&root);
+        let model_dir = paths.root().join(MODEL_SMALL.directory);
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::write(model_dir.join("model.onnx"), b"fake model").unwrap();
+
+        let other_dir = paths.root().join(MODEL_BASE.directory);
+        fs::create_dir_all(&other_dir).unwrap();
+        fs::write(other_dir.join("model.onnx"), b"other model").unwrap();
+
+        let report = remove_model(&paths, &MODEL_SMALL).unwrap();
+        assert_eq!(report.files, 1);
+        assert!(!model_dir.exists());
+        assert!(other_dir.join("model.onnx").is_file());
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

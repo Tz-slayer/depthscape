@@ -114,6 +114,19 @@ pub const MODEL_BIREFNET: ModelDescriptor = ModelDescriptor {
 };
 
 /// The spatial foreground model is independent from the selected depth model.
+pub const SPATIAL_ISNET_GENERAL: ModelDescriptor = ModelDescriptor {
+    id: "spatial-isnet",
+    name: "IS-Net General (170 MiB)",
+    kind: ModelKind::SpatialIsNet,
+    size: 178_648_008,
+    sha256: "60920e99c45464f2ba57bee2ad08c919a52bbf852739e96947fbb4358c0d964a",
+    fingerprint: "60920e99c45464f2",
+    url: "https://github.com/danielgatis/rembg/releases/download/v0.0.0/isnet-general-use.onnx",
+    directory: "models/isnet-general",
+    filename: "isnet-general-use.onnx",
+    extra_file: None,
+};
+
 pub const SPATIAL_ISNET_ANIME: ModelDescriptor = ModelDescriptor {
     id: "spatial-isnet-anime",
     name: "IS-Net Anime (168 MiB)",
@@ -151,12 +164,18 @@ pub fn find_model(id: &str) -> Option<&'static ModelDescriptor> {
 
 /// Foreground models that may produce the spatial matte. The depth models are
 /// deliberately excluded: they estimate a field, they do not cut a subject.
-pub const SPATIAL_MODELS: &[&ModelDescriptor] =
-    &[&SPATIAL_ISNET_ANIME, &MODEL_BIREFNET_LITE, &MODEL_BIREFNET];
+pub const SPATIAL_MODELS: &[&ModelDescriptor] = &[
+    &SPATIAL_ISNET_GENERAL,
+    &SPATIAL_ISNET_ANIME,
+    &MODEL_BIREFNET_LITE,
+    &MODEL_BIREFNET,
+];
 
 pub fn find_spatial_model(id: &str) -> Option<&'static ModelDescriptor> {
-    let id = if id.eq_ignore_ascii_case("isnet-anime") || id.eq_ignore_ascii_case("isnet") {
+    let id = if id.eq_ignore_ascii_case("isnet-anime") {
         SPATIAL_ISNET_ANIME.id
+    } else if id.eq_ignore_ascii_case("isnet") || id.eq_ignore_ascii_case("isnet-general") {
+        SPATIAL_ISNET_GENERAL.id
     } else {
         id
     };

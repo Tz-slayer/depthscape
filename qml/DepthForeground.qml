@@ -63,6 +63,12 @@ PanelWindow {
     implicitWidth: root.targetScreen ? root.targetScreen.width : 0
     implicitHeight: root.targetScreen ? root.targetScreen.height : 0
 
+
+    /// The engine writes a downscaled photo alongside the spatial layers; the
+    /// 3D scene samples that instead of the original wallpaper file.
+    /// Downscaled photo for the 3D mesh's colour texture, supplied by the daemon.
+    property string spatialPhotoPath: ""
+
     WlrLayershell.namespace: "depthscape:foreground"
     WlrLayershell.layer: WlrLayer.Background
     WlrLayershell.exclusiveZone: -1
@@ -79,7 +85,20 @@ PanelWindow {
 
     readonly property real screenWidth: targetScreen ? targetScreen.width : 0
     readonly property real screenHeight: targetScreen ? targetScreen.height : 0
-    readonly property real dpr: (targetScreen && targetScreen.devicePixelRatio) ? targetScreen.devicePixelRatio : 1
+    /// Real compositor scale, not `devicePixelRatio` (which Quickshell rounds up
+    /// for fractional scaling: 1.5 -> 2). Matches dux-shell's wallpaper texture
+    /// sizing, so our decoded textures are the same size as the shell's and the
+    /// engine's capped masks land at 1:1 instead of being upsampled.
+    readonly property real dpr: {
+        if (targetScreen && typeof CompositorService !== "undefined"
+                && CompositorService.getScreenScale) {
+            const scale = CompositorService.getScreenScale(targetScreen);
+            if (scale > 0)
+                return scale;
+        }
+        return (targetScreen && targetScreen.devicePixelRatio > 0)
+            ? targetScreen.devicePixelRatio : 1;
+    }
     readonly property real marginX: root.maxTravel > 0 ? screenWidth * (root.maxTravel + 0.001) : 0
     readonly property real marginY: root.maxTravel > 0 ? screenHeight * (root.maxTravel + 0.001) : 0
 
@@ -101,6 +120,12 @@ PanelWindow {
     // Transition progress: 0.0 = 100% current, 1.0 = 100% incoming
     property real transitionProgress: 0.0
     property bool isTransitioning: false
+    // Exposed for `depthscape debug` only: a staged pair that never starts is
+    // the difference between "still loading" and "gate is deadlocked".
+    readonly property int incomingWpStatus: incomingWpSource.status
+    readonly property int incomingMaskStatus: incomingMaskSource.status
+    readonly property int currentWpStatus: currentWpSource.status
+    readonly property int currentMaskStatus: currentMaskSource.status
 
     readonly property int transitionDuration: (SessionData.wallpaperTransition === "none") ? 0 : 1000
 
@@ -110,6 +135,22 @@ PanelWindow {
         const wantedBbox = root.bbox;
         const wantedW = root.imageWidth;
         const wantedH = root.imageHeight;
+
+        // A different wallpaper: the pair on screen belongs to the old image, so
+        // fading it out would float the previous subject over the new wallpaper
+        // for the whole transition. Drop it instead; the new pair fades in once
+        // its mask exists. Fades are still used for same-wallpaper updates.
+        if (currentWp !== "" && wantedWp !== "" && wantedWp !== currentWp) {
+            transitionAnim.stop();
+            isTransitioning = false;
+            transitionProgress = 0.0;
+            currentWp = "";
+            currentMask = "";
+            currentBbox = null;
+            incomingWp = "";
+            incomingMask = "";
+            incomingBbox = null;
+        }
 
         // Initial setup: cold start
         if (currentWp === "" && incomingWp === "") {
@@ -169,6 +210,13 @@ PanelWindow {
 
         // Wait until incoming images are Ready before cross-fading
         checkIncomingReady();
+        // A staged pair whose images never report Ready (a path that was deleted,
+        // or an Image that already errored and will not retry the same source)
+        // must not leave the previous pair on screen forever. Commit it instead:
+        // the current slot re-binds to the new paths and picks them up, and a
+        // genuinely missing mask degrades to "no occlusion" rather than "stale".
+        if (!isTransitioning && incomingMask !== "")
+            stagedWatchdog.restart();
     }
 
     function checkIncomingReady() {
@@ -210,6 +258,18 @@ PanelWindow {
         isTransitioning = false;
     }
 
+    Timer {
+        id: stagedWatchdog
+        interval: root.transitionDuration + 600
+        repeat: false
+        onTriggered: {
+            if (root.isTransitioning || root.incomingWp === "" || root.incomingMask === "")
+                return;
+            console.warn("Depthscape: staged foreground pair never became ready; committing it to avoid a stale layer");
+            root.finishTransition();
+        }
+    }
+
     NumberAnimation {
         id: transitionAnim
         target: root
@@ -221,9 +281,25 @@ PanelWindow {
         onFinished: root.finishTransition()
     }
 
-    onWallpaperPathChanged: updateTargets()
-    onMaskPathChanged: updateTargets()
-    onBboxChanged: updateTargets()
+    // The daemon replaces the row atomically, but these are three separate
+    // properties, so QML re-evaluates them as three independent signals. Acting
+    // on the first one sees the new wallpaper next to the previous mask and
+    // paints the new image in the old subject's shape. Coalesce them: run once
+    // after every property of that row has settled.
+    property bool _targetsScheduled: false
+    function scheduleTargets() {
+        if (_targetsScheduled)
+            return;
+        _targetsScheduled = true;
+        Qt.callLater(() => {
+            _targetsScheduled = false;
+            updateTargets();
+        });
+    }
+
+    onWallpaperPathChanged: scheduleTargets()
+    onMaskPathChanged: scheduleTargets()
+    onBboxChanged: scheduleTargets()
 
     function checkReady() {
         if (root.spatialSceneReady) {
@@ -485,7 +561,7 @@ PanelWindow {
                     surfaceVisible: root.visible
                     sceneLayer: "foreground"
                     sourcePath: root.foregroundPath !== "" ? root.foregroundPath : root.wallpaperPath
-                    originalPath: root.wallpaperPath
+                    originalPath: root.spatialPhotoPath !== "" ? root.spatialPhotoPath : root.wallpaperPath
                     backgroundPath: root.backgroundPath
                     depthPath: root.depthPath
                     mattePath: root.mattePath
@@ -518,7 +594,6 @@ PanelWindow {
     readonly property int spatialNativeStatus: spatialScene.nativeStatus
     readonly property alias foregroundItem: foregroundContent
     readonly property alias spatialSceneItem: spatialScene
-    readonly property real foregroundAspect: root.effectiveSourceAspect
     readonly property bool overviewBlurActive:
         CompositorService.isNiri
         && (SettingsData.blurWallpaperOnOverview ?? false)

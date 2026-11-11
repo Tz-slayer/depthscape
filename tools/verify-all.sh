@@ -51,6 +51,15 @@ else
     echo "  SKIP  node regression tests (node not on PATH)"
 fi
 
+# Catches the two ways translations rot on their own: a term whose call site was
+# renamed or deleted, and a term added to QML without ever reaching the catalog.
+if command -v python3 >/dev/null; then
+    python3 tools/i18n.py check
+    report "translation catalog in sync with QML call sites" $?
+else
+    echo "  SKIP  i18n check (python3 not on PATH)"
+fi
+
 dms_qml_root=$(ls -d /run/user/"$(id -u)"/dms-shell/*/ /run/user/"$(id -u)"/danklinux-shell/*/ 2>/dev/null | head -1)
 # Newer DMS builds run Quickshell directly from a source tree instead of the
 # generated runtime root. Ask the running process where its shell root is.
@@ -157,25 +166,56 @@ fi
 echo
 echo "=== model download policy ==="
 
-# The plugin offers exactly three depth estimators. The engine's ALL_MODELS and
-# the settings page's modelIds must agree, or `status` would advertise models
-# the dropdown cannot show (or the dropdown would offer ones the engine rejects).
+# Models are no longer user-selectable: the daemon pins one depth model and one
+# matting model, and provisions exactly those on first run. Keep the engine's
+# catalogue, the pinned pair and the download list in agreement, and keep the
+# settings page free of a model picker (that is what "hidden" means).
 python3 - <<'PY'
 import pathlib, re, sys
 rust = pathlib.Path("engine/src/config.rs").read_text()
-qml = pathlib.Path("qml/DepthSettings.qml").read_text()
+daemon = pathlib.Path("qml/DepthDaemon.qml").read_text()
+settings = pathlib.Path("qml/DepthSettings.qml").read_text()
+
 m = re.search(r'ALL_MODELS: &\[ModelDescriptor\] = &\[(.*?)\];', rust, re.S)
 items = re.findall(r'MODEL_[A-Z_]+', m.group(1)) if m else []
 if items != ["MODEL_SMALL", "MODEL_BASE", "MODEL_LARGE"]:
     print("ALL_MODELS must be exactly MODEL_SMALL, MODEL_BASE, MODEL_LARGE; got:", items)
     sys.exit(1)
-qm = re.search(r'modelIds:\s*\[(.*?)\]', qml, re.S)
-ids = re.findall(r'"([^"]+)"', qm.group(1)) if qm else []
-if ids != ["small", "base", "large"]:
-    print("settings page modelIds must be exactly small, base, large; got:", ids)
+
+pinned = {
+    'readonly property string modelType: "small"': "depth model",
+    'readonly property string spatialModel: "isnet-anime"': "matting model",
+}
+for needle, label in pinned.items():
+    if needle not in daemon:
+        print(f"daemon must pin the {label} with: {needle}")
+        sys.exit(1)
+
+if 'defaultModelIds: ["small", "spatial-isnet-anime"]' not in daemon:
+    print("daemon must auto-provision exactly [small, spatial-isnet-anime]")
+    sys.exit(1)
+
+if re.search(r'modelIds\s*:', settings):
+    print("settings page must not expose a model catalogue any more")
     sys.exit(1)
 PY
-report "depth model catalogue is V2-only" $?
+report "fixed model pair is pinned and auto-provisioned" $?
+
+# The 3D scene samples the engine's downscaled photo. QML derives its path from
+# the matte path, so the engine's naming and that derivation have to stay in
+# lockstep or the mesh silently loses its colour texture.
+python3 - <<'PY'
+import pathlib, sys
+rust = pathlib.Path("engine/src/cache.rs").read_text()
+daemon = pathlib.Path("qml/DepthDaemon.qml").read_text()
+if '-photo.png' not in rust:
+    print("engine no longer writes <key>-photo.png")
+    sys.exit(1)
+if '/-matte\\.png$/, "-photo.png"' not in daemon:
+    print("daemon no longer derives the photo path from the matte path")
+    sys.exit(1)
+PY
+report "spatial photo layer naming matches its consumer" $?
 
 # `setup` is the one and only download entry point. A `model::download` call
 # anywhere else means a wallpaper change, a shell start or a spatial effect

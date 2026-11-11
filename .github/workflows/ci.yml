@@ -41,6 +41,9 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Static OpenCV
+        uses: ./.github/actions/opencv-static
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: engine
@@ -80,6 +83,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Static OpenCV
+        uses: ./.github/actions/opencv-static
 
       - uses: actions/setup-node@v4
         with:

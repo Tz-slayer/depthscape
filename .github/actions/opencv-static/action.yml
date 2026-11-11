@@ -1,0 +1,75 @@
+name: Static OpenCV
+description: >-
+  Build (or restore) the minimal static OpenCV the depth engine links against,
+  and export the OPENCV_* variables its build script needs.
+
+# The engine embeds OpenCV (core, imgproc, geometry, flann) so the shipped
+# binary stays self-contained. Every job that compiles the engine has to run
+# this first, otherwise `cargo build` fails looking for a system OpenCV.
+
+runs:
+  using: composite
+  steps:
+    - name: Install build tools
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          build-essential cmake ninja-build pkg-config libclang-dev
+
+    - name: Restore cached OpenCV
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/opencv-static/install
+        # Bump the trailing version whenever the flags below change.
+        key: opencv-5.0.0-${{ runner.os }}-static-core-imgproc-v1
+
+    - name: Build static OpenCV
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        root="${{ runner.temp }}/opencv-static"
+        mkdir -p "$root"
+        cd "$root"
+        curl -fsSL -o src.tar.gz \
+          https://github.com/opencv/opencv/archive/refs/tags/5.0.0.tar.gz
+        tar xzf src.tar.gz
+        # Only the modules the spatial pipeline uses, with every optional
+        # integration the engine does not need switched off. Each one left on
+        # pulls in another shared object and defeats the static link.
+        cmake -S opencv-5.0.0 -B build -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DBUILD_SHARED_LIBS=OFF \
+          -DBUILD_LIST=core,imgproc \
+          -DWITH_IPP=OFF -DWITH_LAPACK=OFF -DWITH_ITT=OFF \
+          -DWITH_EIGEN=OFF -DWITH_TBB=OFF -DWITH_OPENMP=OFF \
+          -DWITH_FFMPEG=OFF -DWITH_GSTREAMER=OFF -DWITH_GTK=OFF -DWITH_QT=OFF \
+          -DWITH_OPENEXR=OFF -DWITH_WEBP=OFF -DWITH_TIFF=OFF -DWITH_JASPER=OFF \
+          -DWITH_AVIF=OFF -DWITH_V4L=OFF -DWITH_1394=OFF -DWITH_PROTOBUF=OFF \
+          -DWITH_ADE=OFF \
+          -DBUILD_ZLIB=ON -DBUILD_PNG=ON -DBUILD_JPEG=ON \
+          -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+          -DCMAKE_INSTALL_PREFIX="$root/install"
+        # GCC has been seen to abort with an internal compiler error while
+        # building one of the AVX-512 dispatch units; the failure is not
+        # reproducible on a second run, so retry once instead of pinning
+        # CPU dispatch and changing the shipped binary.
+        if ! ninja -C build; then
+          echo "::warning::ninja failed; retrying once (known GCC ICE on an AVX-512 unit)"
+          ninja -C build
+        fi
+        cmake --install build
+
+    - name: Export engine link settings
+      shell: bash
+      run: |
+        root="${{ runner.temp }}/opencv-static/install"
+        {
+          echo "OPENCV_ROOT=$root"
+          echo "OPENCV_DISABLE_PROBES=pkg_config,cmake,vcpkg_cmake"
+          echo "OPENCV_INCLUDE_PATHS=$root/include/opencv5"
+          echo "OPENCV_LINK_PATHS=$root/lib"
+          echo "OPENCV_LINK_LIBS=opencv_imgproc,opencv_geometry,opencv_flann,opencv_core"
+        } >> "$GITHUB_ENV"

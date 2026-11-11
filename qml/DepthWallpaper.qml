@@ -106,6 +106,10 @@ PanelWindow {
     implicitWidth: root.targetScreen ? root.targetScreen.width : 0
     implicitHeight: root.targetScreen ? root.targetScreen.height : 0
 
+
+    /// Downscaled photo for the 3D mesh's colour texture, supplied by the daemon.
+    property string spatialPhotoPath: ""
+
     WlrLayershell.namespace: "depthscape:wallpaper"
     WlrLayershell.layer: WlrLayer.Background
     WlrLayershell.exclusiveZone: -1
@@ -128,8 +132,20 @@ PanelWindow {
     // which would collapse the canvas and keep the image from ever loading.
     readonly property real screenWidth: targetScreen ? targetScreen.width : 0
     readonly property real screenHeight: targetScreen ? targetScreen.height : 0
-    readonly property real dpr: (targetScreen && targetScreen.devicePixelRatio)
-        ? targetScreen.devicePixelRatio : 1
+    /// Real compositor scale, not `devicePixelRatio` (which Quickshell rounds up
+    /// for fractional scaling: 1.5 -> 2). Matches dux-shell's wallpaper texture
+    /// sizing, so our decoded textures are the same size as the shell's and the
+    /// engine's capped masks land at 1:1 instead of being upsampled.
+    readonly property real dpr: {
+        if (targetScreen && typeof CompositorService !== "undefined"
+                && CompositorService.getScreenScale) {
+            const scale = CompositorService.getScreenScale(targetScreen);
+            if (scale > 0)
+                return scale;
+        }
+        return (targetScreen && targetScreen.devicePixelRatio > 0)
+            ? targetScreen.devicePixelRatio : 1;
+    }
 
     readonly property bool spatialReady: root.spatialEnabled && root.spatialAssetsReady
         && root.spatialBackgroundPath !== "" && root.spatialForegroundPath !== ""
@@ -142,7 +158,7 @@ PanelWindow {
     readonly property alias spatialSceneItem: spatialScene
     readonly property real spatialCameraPointerX: spatialScene.nativePointerX
     readonly property real spatialCameraPointerY: spatialScene.nativePointerY
-    readonly property real spatialCameraMotionScale: spatialScene.nativeMotionScale
+    readonly property real spatialZoom: spatialScene.nativeImageZoom
     readonly property real effectiveOutputAspect: root.screenWidth / Math.max(1, root.screenHeight)
     readonly property real effectiveSourceAspect: (root.imageWidth > 0 && root.imageHeight > 0)
         ? (root.imageWidth / root.imageHeight)
@@ -279,7 +295,7 @@ PanelWindow {
                 spatialEnabled: root.spatialReady
                 sceneLayer: "background"
                 sourcePath: root.wallpaperPath
-                originalPath: root.wallpaperPath
+                originalPath: root.spatialPhotoPath !== "" ? root.spatialPhotoPath : root.wallpaperPath
                 backgroundPath: root.spatialBackgroundPath
                 depthPath: root.spatialDepthPath
                 mattePath: root.spatialMattePath

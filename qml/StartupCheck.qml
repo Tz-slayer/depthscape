@@ -20,8 +20,8 @@ QtObject {
         ], (stdout, exitCode) => {
             if (stdout.trim() !== "ok") {
                 done({
-                    "title": I18n.tr("curl is required"),
-                    "details": I18n.tr("Depthscape requires curl to automatically download depth models and engine binaries.")
+                    "title": I18n.trFor("depthscape", "curl is required"),
+                    "details": I18n.trFor("depthscape", "Depthscape requires curl to automatically download depth models and engine binaries.")
                 });
                 return;
             }

@@ -13,6 +13,7 @@ mod palette;
 mod pipeline;
 mod protocol;
 mod spatial_assets;
+mod spatial_ops;
 mod spatial_segment;
 
 use anyhow::{bail, Context, Result};
@@ -77,13 +78,32 @@ enum Command {
         #[arg(long, default_value_t = false)]
         spatial: bool,
 
-        /// Foreground model for the spatial layers (isnet-anime, birefnet-lite, birefnet).
-        #[arg(long, default_value = "isnet-anime")]
+        /// Foreground model for the spatial layers (isnet, isnet-anime, birefnet-lite, birefnet).
+        #[arg(long, default_value = "isnet")]
         spatial_model: String,
+
+        /// Wallpapers still displayed on some screen. Cached artefacts for any
+        /// other wallpaper are deleted after this analysis; repeat once per
+        /// screen. Omitting the flag keeps the cache untouched.
+        #[arg(long, value_name = "PATH")]
+        keep: Vec<PathBuf>,
+
+        /// Largest long-edge resolution any display can show. The wallpaper is
+        /// downscaled to it before any tier runs, so masks, palettes and the
+        /// spatial layers stay proportional to the screen instead of the file.
+        #[arg(long, value_name = "PX")]
+        max_dimension: Option<u32>,
     },
 
     /// Delete every cached depth, mask, palette, and spatial asset.
     ClearCache,
+
+    /// Remove a single downloaded model to free disk space.
+    RemoveModel {
+        /// Model ID to remove (e.g. small, base, large, isnet, birefnet-lite).
+        #[arg(long)]
+        model: String,
+    },
 
     /// Remove all downloaded models and generated data (used when the plugin
     /// is uninstalled). This is the only destructive command; it never touches
@@ -136,6 +156,8 @@ fn main() -> Result<()> {
             model,
             spatial,
             spatial_model,
+            keep,
+            max_dimension,
         } => {
             let descriptor = config::find_model(&model).ok_or_else(|| model_err(&model))?;
             let segment_descriptor =
@@ -159,13 +181,39 @@ fn main() -> Result<()> {
                 spatial,
                 spatial_model: segment_descriptor,
                 model: descriptor,
+                max_dimension,
             };
             let outcome = pipeline::analyze(&paths, &request)?;
+            // Drop derived artefacts for wallpapers no screen shows any more.
+            // Strictly opt-in: a caller that does not pass --keep (bench.py,
+            // verify-all.sh, a hand-run analyse) must not silently wipe the
+            // retention of wallpapers it knows nothing about. The analysed
+            // wallpaper is always retained so a partial list cannot delete the
+            // result that was just produced, and a prune failure must never
+            // invalidate a finished analysis.
+            if !keep.is_empty() {
+                let mut keep_hashes: Vec<String> = keep
+                    .iter()
+                    .filter_map(|path| cache::hash_file(path).ok())
+                    .collect();
+                if let Ok(hash) = cache::hash_file(&request.wallpaper) {
+                    if !keep_hashes.contains(&hash) {
+                        keep_hashes.push(hash);
+                    }
+                }
+                if let Err(error) = cache::prune_to_wallpapers(&paths, &keep_hashes) {
+                    eprintln!("Depthscape: cache prune skipped ({error:#})");
+                }
+            }
             emit(&protocol::AnalyzeReport::from(outcome))?;
         }
         Command::ClearCache => {
             let removed = cache::clear_all(&paths)?;
             emit(&protocol::ClearReport { removed })?;
+        }
+        Command::RemoveModel { model } => {
+            let descriptor = config::find_model(&model).ok_or_else(|| model_err(&model))?;
+            emit(&model::remove_model(&paths, descriptor)?)?;
         }
         Command::Uninstall => {
             emit(&model::uninstall(&paths)?)?;

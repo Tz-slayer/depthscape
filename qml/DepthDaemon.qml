@@ -34,7 +34,7 @@ PluginComponent {
     readonly property bool widgetsEnabled: pluginData.widgetsEnabled ?? true
     readonly property int thresholdPercent: pluginData.threshold ?? 30
     readonly property int featherPercent: pluginData.feather ?? 8
-    readonly property string modelType: pluginData.modelType ?? "small"
+    readonly property string modelType: "small"
 
     // Canvas-follows-workspace (parallax). Percentages in settings, fractions
     // here. Defaults: 5% vertical step, 6% horizontal step, 25% travel. The
@@ -48,10 +48,9 @@ PluginComponent {
     // stays (it is woven through the canvas math) but nothing turns it on.
     readonly property bool parallaxEnabled: pluginData.parallaxEnabled ?? false
     readonly property bool spatialEnabled: pluginData.spatialEnabled ?? false
-    readonly property string spatialModel: pluginData.spatialModel ?? "isnet-anime"
+    readonly property string spatialModel: "isnet-anime"
     // Runtime-only: advanced controls are exposed only after an explicit CLI
     // command and reset to production defaults after the shell restarts.
-    property bool debugMode: false
     readonly property int parallaxStepPercent: pluginData.parallaxStep ?? 5
     readonly property int parallaxStepHorizontalPercent: pluginData.parallaxStepHorizontal ?? 6
     readonly property int parallaxMaxTravelPercent: pluginData.parallaxMaxTravel ?? 25
@@ -66,7 +65,6 @@ PluginComponent {
     // body); the 50% default moves them at 1.5x wallpaper speed; 100% is
     // window speed. The mask rides with the wallpaper regardless, so higher
     // values make the widgets dive deeper behind the subject.
-    readonly property int parallaxWidgetStrength: Math.max(0, Math.min(200, pluginData.parallaxWidgetStrength ?? 50))
 
     readonly property real threshold: thresholdPercent / 100
     readonly property real feather: featherPercent / 100
@@ -95,35 +93,6 @@ PluginComponent {
         if (screenName && pluginData["feather_" + screenName] !== undefined)
             return pluginData["feather_" + screenName];
         return root.featherPercent;
-    }
-
-    function fgOffsetXFor(screenName) {
-        if (!root.debugMode)
-            return 0;
-        if (screenName && pluginData["fg_offset_x_" + screenName] !== undefined)
-            return Number(pluginData["fg_offset_x_" + screenName]);
-        return Number(pluginData["fg_offset_x"] ?? 0);
-    }
-
-    function fgOffsetYFor(screenName) {
-        if (!root.debugMode)
-            return 0;
-        if (screenName && pluginData["fg_offset_y_" + screenName] !== undefined)
-            return Number(pluginData["fg_offset_y_" + screenName]);
-        return Number(pluginData["fg_offset_y"] ?? 0);
-    }
-
-    function fgScaleFor(screenName) {
-        if (!root.debugMode)
-            return 1;
-        if (screenName && pluginData["fg_scale_" + screenName] !== undefined)
-            return Number(pluginData["fg_scale_" + screenName]) / 100;
-        return Number(pluginData["fg_scale"] ?? 100) / 100;
-    }
-
-    function setDebugMode(enabled) {
-        root.debugMode = enabled === true;
-        return root.debugMode;
     }
 
     function effectEnabledFor(screenName) {
@@ -186,11 +155,6 @@ PluginComponent {
             root._intSettingFor(screenName, "parallaxStepHorizontal", 6)));
     }
 
-    function parallaxWidgetStrengthFor(screenName) {
-        return Math.max(0, Math.min(200,
-            root._intSettingFor(screenName, "parallaxWidgetStrength", 50)));
-    }
-
     function parallaxInvertedFor(screenName) {
         return root._boolSettingFor(screenName, "parallaxInverted", false);
     }
@@ -229,9 +193,78 @@ PluginComponent {
     property bool modelReady: false
     property bool modelBusy: false
     property string installingModel: ""
+    property string removingModel: ""
     property var availableModels: []
     property var foregroundModels: []
     property var currentModelInfo: null
+
+    /// Models this build always uses. They are provisioned automatically so a
+    /// cold install needs no manual step, and the decision is derived from what
+    /// is actually on disk rather than a persisted flag -- a re-cloned plugin
+    /// directory loses its models, and a stored flag would leave it stuck
+    /// believing they are still there.
+    readonly property var defaultModelIds: ["small", "spatial-isnet-anime"]
+    property var defaultModelQueue: []
+    property bool defaultModelFailed: false
+    property int defaultModelAttempts: 0
+
+    function defaultModelsPresent() {
+        for (const id of root.defaultModelIds) {
+            if (!root.isModelReady(id))
+                return false;
+        }
+        return true;
+    }
+
+    function ensureDefaultModels() {
+        if (!pluginService || enginePath === "" || modelBusy)
+            return;
+        if (root.defaultModelFailed)
+            return;
+        if (root.defaultModelQueue.length > 0)
+            return;
+        if (root.defaultModelsPresent())
+            return;
+        if (root.defaultModelAttempts >= 2)
+            return;
+        root.defaultModelAttempts += 1;
+        root.defaultModelQueue = root.defaultModelIds.filter(id => !root.isModelReady(id));
+        if (root.defaultModelQueue.length === 0)
+            return;
+        if (typeof ToastService !== "undefined" && ToastService.showInfo) {
+            ToastService.showInfo(
+                I18n.trFor("depthscape", "Depthscape"),
+                I18n.trFor("depthscape", "Downloading default models..."),
+                "",
+                "depthscape-default-models"
+            );
+        }
+        root.installModel(root.defaultModelQueue.shift());
+    }
+
+    function advanceDefaultModels() {
+        if (root.defaultModelFailed) {
+            root.defaultModelQueue = [];
+            return;
+        }
+        if (root.defaultModelQueue.length > 0) {
+            root.installModel(root.defaultModelQueue.shift());
+            return;
+        }
+        if (!root.defaultModelsPresent())
+            console.warn("Depthscape: default models still missing after download");
+    }
+
+    Timer {
+        id: defaultModelRetry
+        interval: 10 * 60 * 1000
+        repeat: false
+        onTriggered: {
+            root.defaultModelFailed = false;
+            root.defaultModelAttempts = 0;
+            root.ensureDefaultModels();
+        }
+    }
 
     /// Model-lookup helpers exposed as first-class daemon API.
     ///
@@ -279,6 +312,50 @@ PluginComponent {
 
     function usesNativeWallpaper(screenName) {
         return false;
+    }
+
+    /// Largest wallpaper texture any screen decodes to, mirroring dux-shell's
+    /// own sizing (Modules/WallpaperBackground.qml): logical size × the
+    /// compositor's real scale, clamped to the max texture side. The engine
+    /// reduces the wallpaper to this before any tier runs, so masks, palettes
+    /// and the spatial layers match what the display can actually show instead
+    /// of the file's native resolution.
+    readonly property int maxTextureSide: 8192
+
+    function screenScaledLongEdge(screen) {
+        const scale = (typeof CompositorService !== "undefined" && CompositorService.getScreenScale)
+            ? (CompositorService.getScreenScale(screen) || 1)
+            : ((screen.devicePixelRatio > 0) ? screen.devicePixelRatio : 1);
+        return Math.max(
+            Math.min(Math.round(screen.width * scale), root.maxTextureSide),
+            Math.min(Math.round(screen.height * scale), root.maxTextureSide));
+    }
+
+    function maxDeviceDimension() {
+        let best = 0;
+        for (const screen of Quickshell.screens)
+            best = Math.max(best, root.screenScaledLongEdge(screen));
+        return best;
+    }
+
+    /// Wallpapers that some screen is actually using right now. The engine keeps
+    /// cached depth/mask/palette/spatial artefacts only for these, so switching
+    /// wallpaper deletes the previous one's derived data instead of accumulating
+    /// it. Screens with both effects off contribute nothing.
+    function displayedWallpapers() {
+        const out = [];
+        for (const screen of Quickshell.screens) {
+            const name = screen.name;
+            if (root.usesNativeWallpaper(name))
+                continue;
+            if (!root.effectEnabledFor(name) && !root.spatialEnabledFor(name))
+                continue;
+            const path = root.wallpaperFor(name);
+            if (path === "" || out.indexOf(path) >= 0)
+                continue;
+            out.push(path);
+        }
+        return out;
     }
 
     onNativeWallpaperSignatureChanged: Qt.callLater(() => {
@@ -395,6 +472,13 @@ PluginComponent {
         return row && row.state === "ready" ? (row.spatialMattePath || "") : "";
     }
 
+    /// The engine writes the downscaled photo beside the spatial matte; the 3D
+    /// scene samples it as its colour texture. Derived here once instead of in
+    /// each window, and `verify-all` asserts the engine still names it that way.
+    function spatialPhotoFor(screenName) {
+        return root.spatialMatteFor(screenName).replace(/-matte\.png$/, "-photo.png");
+    }
+
     function spatialInfluenceFor(screenName) {
         if (!spatialEnabledFor(screenName))
             return "";
@@ -424,7 +508,7 @@ PluginComponent {
     function shortError() {
         let message = (lastStderr || "").trim();
         if (message.length === 0)
-            message = I18n.tr("The depth engine failed without reporting a reason.");
+            message = I18n.trFor("depthscape", "The depth engine failed without reporting a reason.");
         if (message.length > 300)
             message = message.substring(0, 297) + "...";
         return message;
@@ -541,6 +625,11 @@ PluginComponent {
         ];
         if (spatialEnabledFor(job.screenName))
             command.push("--spatial", "--spatial-model", root.spatialModel);
+        for (const path of root.displayedWallpapers())
+            command.push("--keep", path);
+        const maxDimension = root.maxDeviceDimension();
+        if (maxDimension > 0)
+            command.push("--max-dimension", "" + maxDimension);
         analyzeProcess.command = root.engineArgs(command);
         analyzeProcess.running = true;
     }
@@ -610,7 +699,7 @@ PluginComponent {
                 "spatialDepthPath": "",
                 "spatialMattePath": "",
                 "spatialInfluencePath": "",
-                "message": I18n.tr("The depth engine returned an unexpected result.")
+                "message": I18n.trFor("depthscape", "The depth engine returned an unexpected result.")
             });
         } else {
             patchRow(job.screenName, {
@@ -669,10 +758,6 @@ PluginComponent {
     function lookupCachedEntry(map, screenName, wallpaper, pKey) {
         if (!map || typeof map !== "object" || !wallpaper)
             return null;
-        const history = (map._history && typeof map._history === "object") ? map._history : null;
-        const hKey = wallpaper + "|" + pKey;
-        if (history && history[hKey] && history[hKey].maskPath)
-            return history[hKey];
         const direct = map[screenName];
         if (direct && direct.wallpaper === wallpaper && direct.parametersKey === pKey && direct.maskPath)
             return direct;
@@ -758,18 +843,20 @@ PluginComponent {
             "spatialInfluencePath": spatialInfluencePath || "",
             "spatialWarning": spatialWarning || ""
         };
+        // Only the wallpapers on screen are remembered. The engine deletes the
+        // derived files for everything else, so keeping a 60-entry history here
+        // would hand out paths that no longer exist -- and an Image that fails
+        // to load never retries on the same source.
         map[screenName] = entry;
-        const history = (map._history && typeof map._history === "object")
-            ? Object.assign({}, map._history) : {};
-        const hKey = wallpaper + "|" + paramsKey;
-        delete history[hKey];
-        history[hKey] = entry;
-        const keys = Object.keys(history);
-        while (keys.length > 60) {
-            const oldest = keys.shift();
-            delete history[oldest];
+        delete map._history;
+        const displayed = root.displayedWallpapers();
+        for (const key in map) {
+            if (key === "_history")
+                continue;
+            const row = map[key];
+            if (row && typeof row === "object" && row.wallpaper && displayed.indexOf(row.wallpaper) < 0)
+                delete map[key];
         }
-        map._history = history;
         pluginService.savePluginData(pluginId, "lastOutputs", map);
     }
 
@@ -930,7 +1017,7 @@ PluginComponent {
                     root.engineAutoDownloadAttempted = true;
                     root.downloadPrebuiltEngine();
                 } else {
-                    root.engineProblem = I18n.tr("Depth engine binary not found. Download or build it in settings.");
+                    root.engineProblem = I18n.trFor("depthscape", "Depth engine binary not found. Download or build it in settings.");
                     root.publish();
                 }
             }
@@ -945,15 +1032,15 @@ PluginComponent {
             root.downloadingEngine = false;
             if (exitCode === 0) {
                 if (typeof ToastService !== "undefined" && ToastService.showInfo) {
-                    ToastService.showInfo(I18n.tr("Depthscape"), I18n.tr("Depth engine downloaded successfully."), "", "depthscape-engine-ready");
+                    ToastService.showInfo(I18n.trFor("depthscape", "Depthscape"), I18n.trFor("depthscape", "Depth engine downloaded successfully."), "", "depthscape-engine-ready");
                 }
                 root.rescanEngine();
             } else {
-                root.engineProblem = I18n.tr("Failed to auto-download engine. Build or retry in settings.");
+                root.engineProblem = I18n.trFor("depthscape", "Failed to auto-download engine. Build or retry in settings.");
                 if (typeof ToastService !== "undefined" && ToastService.showWarning) {
                     ToastService.showWarning(
-                        I18n.tr("Depthscape: engine setup required"),
-                        I18n.tr("Could not download prebuilt engine. Open plugin settings to retry or build from source."),
+                        I18n.trFor("depthscape", "Depthscape: engine setup required"),
+                        I18n.trFor("depthscape", "Could not download prebuilt engine. Open plugin settings to retry or build from source."),
                         "", "depthscape-engine-missing");
                 }
                 root.publish();
@@ -966,7 +1053,7 @@ PluginComponent {
             return;
         downloadingEngine = true;
         if (typeof ToastService !== "undefined" && ToastService.showInfo) {
-            ToastService.showInfo(I18n.tr("Depthscape"), I18n.tr("Downloading prebuilt depth engine..."), "", "depthscape-engine-downloading");
+            ToastService.showInfo(I18n.trFor("depthscape", "Depthscape"), I18n.trFor("depthscape", "Downloading prebuilt depth engine..."), "", "depthscape-engine-downloading");
         }
         downloadEngineProcess.running = true;
     }
@@ -1024,6 +1111,7 @@ PluginComponent {
                 root.modelReady = parsed !== null && parsed.ready === true;
                 root.availableModels = parsed && parsed.availableModels ? parsed.availableModels : [];
                 root.foregroundModels = parsed && parsed.foregroundModels ? parsed.foregroundModels : [];
+                root.ensureDefaultModels();
                 root.currentModelInfo = parsed && parsed.model ? parsed.model : null;
                 if (parsed && parsed.dataDir)
                     root.dataRoot = parsed.dataDir;
@@ -1031,7 +1119,7 @@ PluginComponent {
                 // pull hundreds of megabytes just because the shell started;
                 // the settings page offers an explicit download action instead.
                 if (!root.modelReady) {
-                    root.engineProblem = I18n.tr("Model not downloaded. Use Download Model in the settings page.");
+                    root.engineProblem = I18n.trFor("depthscape", "Model not downloaded. Use Download Model in the settings page.");
                 } else {
                     root.engineProblem = "";
                     root.modelBusy = false;
@@ -1050,15 +1138,23 @@ PluginComponent {
             root.modelBusy = false;
             root.installingModel = "";
             if (exitCode !== 0) {
+                root.defaultModelFailed = true;
+                root.defaultModelQueue = [];
+                defaultModelRetry.restart();
                 root.engineProblem = root.shortError();
                 if (typeof ToastService !== "undefined" && ToastService.showError) {
-                    ToastService.showError(I18n.tr("Depthscape: model download failed"), root.engineProblem, "", "depthscape-setup-fail");
+                    ToastService.showError(I18n.trFor("depthscape", "Depthscape: model download failed"), root.engineProblem, "", "depthscape-setup-fail");
                 }
                 root.publish();
+                root.checkModel();
+                return;
+            }
+            if (root.defaultModelQueue.length > 0) {
+                root.advanceDefaultModels();
                 return;
             }
             if (typeof ToastService !== "undefined" && ToastService.showInfo) {
-                ToastService.showInfo(I18n.tr("Depthscape: model downloaded and verified"), "", "", "depthscape-setup-success");
+                ToastService.showInfo(I18n.trFor("depthscape", "Depthscape: model downloaded and verified"), "", "", "depthscape-setup-success");
             }
             root.checkModel();
         }
@@ -1109,7 +1205,7 @@ PluginComponent {
             if (exitCode !== 0) {
                 root.engineProblem = root.shortError();
                 if (typeof ToastService !== "undefined" && ToastService.showError)
-                    ToastService.showError(I18n.tr("Depthscape: could not remove model data"), root.engineProblem, "", "depthscape-uninstall-fail");
+                    ToastService.showError(I18n.trFor("depthscape", "Depthscape: could not remove model data"), root.engineProblem, "", "depthscape-uninstall-fail");
                 root.publish();
                 root.checkModel();
                 return;
@@ -1119,7 +1215,31 @@ PluginComponent {
             root.modelReady = false;
             root.queue = [];
             if (typeof ToastService !== "undefined" && ToastService.showInfo)
-                ToastService.showInfo(I18n.tr("Depthscape: models and cached data removed"), "", "", "depthscape-uninstall-success");
+                ToastService.showInfo(I18n.trFor("depthscape", "Depthscape: models and cached data removed"), "", "", "depthscape-uninstall-success");
+            root.checkModel();
+        }
+        stderr: StdioCollector {
+            onStreamFinished: root.lastStderr = text
+        }
+    }
+
+    Process {
+        id: removeModelProcess
+
+        command: []
+        onExited: exitCode => {
+            root.modelBusy = false;
+            root.removingModel = "";
+            if (exitCode !== 0) {
+                root.engineProblem = root.shortError();
+                if (typeof ToastService !== "undefined" && ToastService.showError)
+                    ToastService.showError(I18n.trFor("depthscape", "Depthscape: could not remove model data"), root.engineProblem, "", "depthscape-remove-fail");
+                root.publish();
+                root.checkModel();
+                return;
+            }
+            if (typeof ToastService !== "undefined" && ToastService.showInfo)
+                ToastService.showInfo(I18n.trFor("depthscape", "Depthscape: model removed"), "", "", "depthscape-remove-success");
             root.checkModel();
         }
         stderr: StdioCollector {
@@ -1175,6 +1295,20 @@ PluginComponent {
         lastStderr = "";
         uninstallProcess.command = root.engineArgs(["uninstall"]);
         uninstallProcess.running = true;
+    }
+
+    /// Remove a single downloaded model to free disk space.
+    function removeModel(targetModel) {
+        if (enginePath === "" || modelBusy)
+            return;
+        const toRemove = targetModel || root.modelType;
+        modelBusy = true;
+        removingModel = toRemove;
+        engineProblem = "";
+        publish();
+        lastStderr = "";
+        removeModelProcess.command = root.engineArgs(["remove-model", "--model", toRemove]);
+        removeModelProcess.running = true;
     }
 
     /// Re-run the engine lookup after the user has built/installed it.
@@ -1323,6 +1457,8 @@ PluginComponent {
             installModel(action.substring(13), true);
         else if (action.startsWith("install:"))
             installModel(action.substring(8));
+        else if (action.startsWith("removeModel:"))
+            removeModel(action.substring(12));
         else if (action === "uninstall")
             uninstallData();
         else if (action === "rescanEngine")
@@ -1524,8 +1660,12 @@ PluginComponent {
         return sig;
     }
 
-    property string _lastParametersSignature: allParametersSignature()
-    property string _lastModelType: modelType
+    // Snapshots, not bindings. As a binding this tracked the live signature and
+    // the comparison below was always equal, so changing a setting never
+    // re-ran the engine -- the new value only applied on the next wallpaper
+    // change. Seeded in Component.onCompleted.
+    property string _lastParametersSignature: ""
+    property string _lastModelType: ""
 
     Connections {
         target: pluginService
@@ -1721,7 +1861,6 @@ PluginComponent {
                     readonly property int screenMaxTravelPercent: root.parallaxMaxTravelPercentFor(screenName)
                     readonly property int screenStepPercent: root.parallaxStepPercentFor(screenName)
                     readonly property int screenStepHPercent: root.parallaxStepHorizontalPercentFor(screenName)
-                    readonly property int screenWidgetStrength: root.parallaxWidgetStrengthFor(screenName)
                     readonly property bool screenInverted: root.parallaxInvertedFor(screenName)
                     readonly property real screenMaxTravel: screenMaxTravelPercent / 100
                     readonly property real screenSpatialTravel: screenSpatial
@@ -1804,10 +1943,6 @@ PluginComponent {
                     // the parallax proper. The mask stays canvas-pinned, so
                     // this is what makes the widgets overtake the wallpaper
                     // and slip behind the subject. Zero while parallax is off.
-                    readonly property real widgetOffsetX: surfaces.screenParallax
-                        ? tracker.offsetX * surfaces.screenWidgetStrength / 100 : 0
-                    readonly property real widgetOffsetY: surfaces.screenParallax
-                        ? tracker.offsetY * surfaces.screenWidgetStrength / 100 : 0
 
                     // TWO SURFACES, mapped in dependency order.
                     //
@@ -1826,10 +1961,8 @@ PluginComponent {
                     // The mask was cut from the wallpaper, so wallpaper and
                     // mask translate as one rigid body — that alignment is
                     // what keeps the erase region pinned to the subject. The
-                    // widgets are the exception: they get an EXTRA drift on
-                    // top (`widgetOffset*` above), moving faster than the
-                    // wallpaper the way anything nearer the camera does, and
-                    // diving behind the subject wherever the mask erases them.
+                    // desktop widgets stay put, so they slide behind that
+                    // erase region instead of travelling with it.
                     //
                     // The order still matters, and it is still established by map
                     // order: the three surfaces are on the `background` layer,
@@ -1922,6 +2055,7 @@ PluginComponent {
                         spatialDepthPath: root.spatialDepthFor(surfaces.screenName)
                         spatialMattePath: root.spatialMatteFor(surfaces.screenName)
                         spatialInfluencePath: root.spatialInfluenceFor(surfaces.screenName)
+                        spatialPhotoPath: root.spatialPhotoFor(surfaces.screenName)
                         spatialPointerX: spatialInput.pointerX
                         spatialPointerY: spatialInput.pointerY
                         spatialTravel: surfaces.screenSpatialTravel
@@ -1948,6 +2082,7 @@ PluginComponent {
                         depthPath: root.spatialDepthFor(surfaces.screenName)
                         mattePath: root.spatialMatteFor(surfaces.screenName)
                         influencePath: root.spatialInfluenceFor(surfaces.screenName)
+                        spatialPhotoPath: root.spatialPhotoFor(surfaces.screenName)
                         spatialEnabled: surfaces.screenSpatial
                         spatialAssetsReady: surfaces.screenSpatialAssetsExist
                         spatialDisplayActive: surfaces.spatialDisplayActive
@@ -1999,6 +2134,8 @@ PluginComponent {
             pluginService.pluginInstances = newInstances;
         }
         root.loadInitialOutputs();
+        root._lastModelType = root.modelType;
+        root._lastParametersSignature = root.allParametersSignature();
         root.checkCompositorLayerRule();
         // A button pressed while the settings page was waiting for the daemon
         // leaves an `action` in plugin data. Replay it once at startup instead

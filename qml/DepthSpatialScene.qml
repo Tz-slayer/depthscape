@@ -14,6 +14,33 @@ Item {
     property string depthPath: ""
     property string mattePath: ""
     property string influencePath: ""
+    // Tilt at full pointer deflection, shared by the native mesh and the
+    // shader fallback so both frame the wallpaper identically.
+    readonly property real tiltDegrees: 4
+    readonly property real tiltGainLimit: 2.6
+    readonly property bool landscape: root.outputAspect >= 1
+    readonly property real horizontalTiltGain: root.landscape
+        ? 1 : Math.min(root.tiltGainLimit, 1 / Math.max(0.1, root.outputAspect))
+    readonly property real verticalTiltGain: root.landscape
+        ? Math.min(root.tiltGainLimit, root.outputAspect) : 1
+    readonly property real motionScale: Math.max(0, root.spatialTravel / 0.1)
+    readonly property real maxYawRadians: root.tiltDegrees * root.horizontalTiltGain
+        * root.motionScale * Math.PI / 180
+    readonly property real maxPitchRadians: root.tiltDegrees * root.verticalTiltGain
+        * root.motionScale * Math.PI / 180
+
+    /// Enlargement needed so the orbit never reveals the image edge:
+    /// `cos(theta) + sin(theta)/tan(halfFov)` on the axis with the larger need.
+    readonly property real imageZoom: {
+        const halfV = Math.PI * 42 / 360;
+        const halfH = Math.atan(Math.tan(halfV) * Math.max(0.1, root.outputAspect));
+        const coverV = Math.cos(root.maxPitchRadians)
+            + Math.sin(root.maxPitchRadians) / Math.tan(halfV);
+        const coverH = Math.cos(root.maxYawRadians)
+            + Math.sin(root.maxYawRadians) / Math.tan(halfH);
+        return Math.max(1.0, coverV, coverH);
+    }
+
     property real pointerX: 0
     property real pointerY: 0
     property real spatialTravel: 0.03
@@ -43,6 +70,7 @@ Item {
     readonly property real nativePointerX: threeD.item ? threeD.item.pointerX : 0
     readonly property real nativePointerY: threeD.item ? threeD.item.pointerY : 0
     readonly property real nativeMotionScale: threeD.item ? threeD.item.motionScale : 0
+    readonly property real nativeImageZoom: threeD.item ? threeD.item.imageZoom : 0
 
     readonly property bool foreground: sceneLayer === "foreground"
     readonly property real cropX: sourceAspect > outputAspect ? outputAspect / sourceAspect : 1
@@ -138,6 +166,7 @@ Item {
                 1 / Math.max(1, backgroundTexture.sourceSize.width),
                 1 / Math.max(1, backgroundTexture.sourceSize.height))
             property real foregroundOnly: root.foreground ? 1 : 0
+            property real imageZoom: root.imageZoom
             fragmentShader: Qt.resolvedUrl("shaders/spatial_layered.frag.qsb")
             visible: sourceTexture.status === Image.Ready
                 && (!root.foreground || originalTexture.status === Image.Ready)
@@ -189,7 +218,8 @@ Item {
                 item.sourceAspect = root.sourceAspect;
                 item.pointerX = root.easedPointerX;
                 item.pointerY = root.easedPointerY;
-                item.motionScale = Math.max(0, root.spatialTravel / 0.1);
+                item.motionScale = root.motionScale;
+                item.imageZoom = root.imageZoom;
                 if (item.ready)
                     root.fallbackTimedOut = false;
             }
@@ -229,7 +259,7 @@ Item {
         if (Window.window)
             Window.window.update();
     }
-    onSpatialTravelChanged: if (threeD.item) threeD.item.motionScale = Math.max(0, spatialTravel / 0.1)
+    onSpatialTravelChanged: if (threeD.item) threeD.item.motionScale = motionScale
     onOutputAspectChanged: if (threeD.item) threeD.item.outputAspect = outputAspect
     onSourceAspectChanged: if (threeD.item) threeD.item.sourceAspect = sourceAspect
 }

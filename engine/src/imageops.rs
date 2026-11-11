@@ -287,6 +287,26 @@ pub fn foreground_alpha(
 /// refining above the resolution the mask is emitted at would be work whose
 /// result is discarded. The mask is always emitted at the wallpaper's
 /// resolution, so this is the wallpaper itself, capped.
+/// Shrink `(width, height)` until the long edge fits in `cap`, keeping aspect.
+///
+/// Applied once to the decoded wallpaper so every tier below — depth input,
+/// refinement, mask, palette and the spatial layers — works from the same
+/// already-reduced image instead of from the file's native resolution.
+pub fn cap_to_dimension(width: u32, height: u32, cap: Option<u32>) -> (u32, u32) {
+    let (width, height) = (width.max(1), height.max(1));
+    let Some(cap) = cap.filter(|value| *value > 0) else {
+        return (width, height);
+    };
+    let scale = f64::min(1.0, cap as f64 / width.max(height) as f64);
+    if scale >= 1.0 {
+        return (width, height);
+    }
+    (
+        ((width as f64 * scale).round() as u32).max(1),
+        ((height as f64 * scale).round() as u32).max(1),
+    )
+}
+
 pub fn refine_size(source_width: u32, source_height: u32) -> (u32, u32) {
     let (width, height) = (source_width.max(1), source_height.max(1));
     let scale = f64::min(

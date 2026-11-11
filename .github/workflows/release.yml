@@ -30,11 +30,25 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Static OpenCV
+        uses: ./.github/actions/opencv-static
+
       - name: Build Engine
         working-directory: engine
         run: |
           cargo build --release --target ${{ matrix.target }}
           strip target/${{ matrix.target }}/release/${{ matrix.binary_name }}
+
+      # The whole point of the static build: one file, no system OpenCV.
+      - name: Verify the engine is self-contained
+        run: |
+          bin="engine/target/${{ matrix.target }}/release/${{ matrix.binary_name }}"
+          if ldd "$bin" | grep -qi opencv; then
+            echo "::error::engine still links OpenCV dynamically; refusing to publish"
+            ldd "$bin" | grep -i opencv
+            exit 1
+          fi
+          ldd "$bin"
 
       - name: Prepare Release Asset
         run: |

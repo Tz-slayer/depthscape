@@ -106,7 +106,7 @@ pub fn prune(directory: &Path, keep: usize) -> Result<usize> {
             Some((modified, entry.path()))
         })
         .collect();
-    entries.sort_by(|left, right| right.0.cmp(&left.0));
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     let mut removed = 0;
     for (_, path) in entries.into_iter().skip(keep) {
         if fs::remove_file(&path).is_ok() {
@@ -230,6 +230,8 @@ pub struct SpatialCacheEntry {
     pub depth_path: PathBuf,
     pub matte_path: PathBuf,
     pub influence_path: PathBuf,
+    /// Downscaled photo, used as the 3D mesh's colour texture.
+    pub photo_path: PathBuf,
     pub complete_path: PathBuf,
 }
 
@@ -242,12 +244,17 @@ impl SpatialCacheEntry {
             depth_path: paths.spatial_cache().join(format!("{key}-depth.png")),
             matte_path: paths.spatial_cache().join(format!("{key}-matte.png")),
             influence_path: paths.spatial_cache().join(format!("{key}-influence.png")),
+            photo_path: paths.spatial_cache().join(format!("{key}-photo.png")),
             complete_path: paths.spatial_cache().join(format!("{key}-complete")),
         }
     }
 
     pub fn is_cached(&self) -> bool {
+        // `photo` is what the 3D scene samples; a set without it is from a
+        // build that uploaded the original wallpaper instead, so make it
+        // regenerate rather than serve a mix.
         self.complete_path.is_file()
+            && self.photo_path.is_file()
             && self.background_path.is_file()
             && self.foreground_path.is_file()
             && self.depth_path.is_file()
@@ -290,12 +297,56 @@ impl CacheEntry {
 }
 
 /// Trim all cache tiers to their configured retention.
+/// Delete cached artefacts for wallpapers that are no longer displayed.
+///
+/// Every tier keys its files on the wallpaper hash first, so one prefix test
+/// covers depth, refined, mask, palette and spatial together.
+///
+/// An empty `keep` is treated as "the caller did not tell us", not as "keep
+/// nothing": it is a no-op. Without that rule a mis-wired caller would wipe the
+/// whole cache on the next analysis.
+pub fn prune_to_wallpapers(paths: &Paths, keep: &[String]) -> Result<usize> {
+    if keep.is_empty() {
+        return Ok(0);
+    }
+    let mut removed = 0;
+    for directory in [
+        paths.depth_cache(),
+        paths.refined_cache(),
+        paths.mask_cache(),
+        paths.palette_cache(),
+        paths.spatial_cache(),
+    ] {
+        if !directory.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(&directory)? {
+            let path = entry?.path();
+            if !path.is_file() {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            if keep.iter().any(|hash| name.starts_with(hash.as_str())) {
+                continue;
+            }
+            if fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    Ok(removed)
+}
+
 pub fn prune_all(paths: &Paths) -> Result<usize> {
     Ok(prune(&paths.depth_cache(), DEPTH_CACHE_LIMIT)?
         + prune(&paths.refined_cache(), REFINED_CACHE_LIMIT)?
         + prune(&paths.mask_cache(), MASK_CACHE_LIMIT)?
         + prune(&paths.palette_cache(), PALETTE_CACHE_LIMIT)?
-        + prune(&paths.spatial_cache(), SPATIAL_CACHE_LIMIT * 6)?)
+        + prune(&paths.spatial_cache(), SPATIAL_CACHE_LIMIT * 7)?)
 }
 
 /// Remove every cached artefact across the four tiers. Model files untouched.
@@ -327,6 +378,61 @@ pub fn clear_all(paths: &Paths) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every tier prefixes its file names with the wallpaper hash, so one
+    /// retention set can sweep all five directories at once.
+    #[test]
+    fn prune_to_wallpapers_keeps_only_the_displayed_wallpapers() {
+        let root = std::env::temp_dir().join(format!(
+            "depthscape-prune-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let paths = Paths::new(root.clone());
+        for directory in [
+            paths.depth_cache(),
+            paths.refined_cache(),
+            paths.mask_cache(),
+            paths.palette_cache(),
+            paths.spatial_cache(),
+        ] {
+            fs::create_dir_all(&directory).unwrap();
+        }
+        fs::write(paths.depth_cache().join("keep-abc-d2-i518.dsc"), b"x").unwrap();
+        fs::write(paths.depth_cache().join("gone-abc-d2-i518.dsc"), b"x").unwrap();
+        fs::write(
+            paths.mask_cache().join("keep-abc-m1-t0.3000-f0.0800.png"),
+            b"x",
+        )
+        .unwrap();
+        fs::write(
+            paths.mask_cache().join("gone-abc-m1-t0.3000-f0.0800.bbox"),
+            b"x",
+        )
+        .unwrap();
+        fs::write(paths.palette_cache().join("keep-abc-p2.json"), b"x").unwrap();
+        fs::write(paths.spatial_cache().join("gone-abc-s9-complete"), b"x").unwrap();
+
+        let removed = prune_to_wallpapers(&paths, &["keep-abc".to_string()]).unwrap();
+        assert_eq!(removed, 3, "only the three 'gone-' files may go");
+        assert!(paths.depth_cache().join("keep-abc-d2-i518.dsc").is_file());
+        assert!(!paths.depth_cache().join("gone-abc-d2-i518.dsc").exists());
+        assert!(paths
+            .mask_cache()
+            .join("keep-abc-m1-t0.3000-f0.0800.png")
+            .is_file());
+        assert!(!paths.spatial_cache().join("gone-abc-s9-complete").exists());
+
+        // An empty retention set is "not told", not "keep nothing".
+        let untouched = prune_to_wallpapers(&paths, &[]).unwrap();
+        assert_eq!(untouched, 0);
+        assert!(paths.depth_cache().join("keep-abc-d2-i518.dsc").is_file());
+
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn mask_key_changes_with_parameters_but_depth_key_does_not() {

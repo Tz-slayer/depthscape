@@ -1,0 +1,131 @@
+{
+  "Build Engine": {
+    "Build Engine": "构建引擎"
+  },
+  "Build failed (exit %1)": {
+    "Build failed (exit %1)": "构建失败 (退出码 %1)"
+  },
+  "Building engine...": {
+    "Building engine...": "正在构建引擎..."
+  },
+  "Building engine... %1": {
+    "Building engine... %1": "正在构建引擎... %1"
+  },
+  "Could not download prebuilt engine. Open plugin settings to retry or build from source.": {
+    "Could not download prebuilt engine. Open plugin settings to retry or build from source.": "无法下载预编译引擎。请打开插件设置重试或从源码编译。"
+  },
+  "Depth Wallpaper": {
+    "Depth Wallpaper": "景深壁纸"
+  },
+  "Depth engine binary not found. Download or build it in settings.": {
+    "Depth engine binary not found. Download or build it in settings.": "未找到深度引擎二进制文件。请在设置中下载或构建。"
+  },
+  "Depth engine downloaded successfully.": {
+    "Depth engine downloaded successfully.": "深度引擎下载成功。"
+  },
+  "Depth model not downloaded.": {
+    "Depth model not downloaded.": "未下载深度模型。"
+  },
+  "Depthscape": {
+    "Depthscape": "Depthscape"
+  },
+  "Depthscape requires curl to automatically download depth models and engine binaries.": {
+    "Depthscape requires curl to automatically download depth models and engine binaries.": "Depthscape 需要 curl 来自动下载深度模型及引擎二进制文件。"
+  },
+  "Depthscape: could not remove model data": {
+    "Depthscape: could not remove model data": "Depthscape：无法移除模型数据"
+  },
+  "Depthscape: engine setup required": {
+    "Depthscape: engine setup required": "Depthscape：需要准备引擎"
+  },
+  "Depthscape: model download failed": {
+    "Depthscape: model download failed": "Depthscape：模型下载失败"
+  },
+  "Depthscape: model downloaded and verified": {
+    "Depthscape: model downloaded and verified": "Depthscape：模型已下载并通过校验"
+  },
+  "Depthscape: model removed": {
+    "Depthscape: model removed": "Depthscape：模型已清除"
+  },
+  "Depthscape: models and cached data removed": {
+    "Depthscape: models and cached data removed": "Depthscape：模型与缓存数据已移除"
+  },
+  "Download Engine": {
+    "Download Engine": "下载引擎"
+  },
+  "Download failed (exit %1)": {
+    "Download failed (exit %1)": "下载失败 (退出码 %1)"
+  },
+  "Download prebuilt binary from GitHub Releases (no Rust needed)": {
+    "Download prebuilt binary from GitHub Releases (no Rust needed)": "从 GitHub Releases 下载预编译二进制（无需安装 Rust 环境）"
+  },
+  "Downloading default models...": {
+    "Downloading default models...": "正在下载默认模型…"
+  },
+  "Downloading prebuilt depth engine...": {
+    "Downloading prebuilt depth engine...": "正在下载预编译深度引擎..."
+  },
+  "Downloading prebuilt engine...": {
+    "Downloading prebuilt engine...": "正在下载预编译引擎..."
+  },
+  "Downloading prebuilt engine... %1": {
+    "Downloading prebuilt engine... %1": "正在下载预编译引擎... %1"
+  },
+  "Edge Feather": {
+    "Edge Feather": "边缘羽化"
+  },
+  "Engine": {
+    "Engine": "引擎"
+  },
+  "Engine binary not found. Download prebuilt binary or press Build Engine.": {
+    "Engine binary not found. Download prebuilt binary or press Build Engine.": "未找到引擎二进制文件。请下载预编译版本或点击“构建引擎”。"
+  },
+  "Failed to auto-download engine. Build or retry in settings.": {
+    "Failed to auto-download engine. Build or retry in settings.": "自动下载引擎失败。请在设置中手动构建或重试。"
+  },
+  "Matting model not downloaded.": {
+    "Matting model not downloaded.": "未下载抠图模型。"
+  },
+  "Model not downloaded. Use Download Model in the settings page.": {
+    "Model not downloaded. Use Download Model in the settings page.": "模型未下载。请在设置页面中点击“下载模型”。"
+  },
+  "Models not downloaded. Please select and download models.": {
+    "Models not downloaded. Please select and download models.": "未下载模型。请在上方选择并下载模型。"
+  },
+  "Occlusion Threshold": {
+    "Occlusion Threshold": "遮挡阈值"
+  },
+  "Parallax Amplitude": {
+    "Parallax Amplitude": "视差幅度"
+  },
+  "Plugin is starting. Reopen this page in a moment.": {
+    "Plugin is starting. Reopen this page in a moment.": "插件正在启动，请稍后重新打开此页面。"
+  },
+  "Re-check Engine": {
+    "Re-check Engine": "重新检测引擎"
+  },
+  "Ready · Depth model and matting model are ready.": {
+    "Ready · Depth model and matting model are ready.": "就绪 · 深度模型与抠图模型均已就绪。"
+  },
+  "Spatial Wallpaper": {
+    "Spatial Wallpaper": "空间壁纸"
+  },
+  "The depth engine failed without reporting a reason.": {
+    "The depth engine failed without reporting a reason.": "深度引擎执行失败，且未返回具体原因。"
+  },
+  "The depth engine returned an unexpected result.": {
+    "The depth engine returned an unexpected result.": "深度引擎返回了异常结果。"
+  },
+  "Wallpaper cycling is on, so each new wallpaper is analysed from scratch: the depth effect briefly disappears after every change.": {
+    "Wallpaper cycling is on, so each new wallpaper is analysed from scratch: the depth effect briefly disappears after every change.": "已开启壁纸轮播：每张新壁纸都会重新分析，因此每次切换后景深效果会短暂消失。"
+  },
+  "Working on %1": {
+    "Working on %1": "正在处理 %1"
+  },
+  "curl is required": {
+    "curl is required": "需要安装 curl"
+  },
+  "model": {
+    "model": "模型"
+  }
+}

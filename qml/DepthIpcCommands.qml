@@ -15,7 +15,6 @@ import qs.Services
 //   remap              Re-attach both surfaces on every output.
 //   settings           Instructions for opening plugin settings.
 //   settingsProbe      Instantiate the settings page off-screen and report it.
-//   debugMode <on|off> Show or hide advanced controls for this shell session.
 //   debug              Return a stable JSON snapshot of every tunable +
 //                      per-output parallax/mask/wallpaper state.
 Item {
@@ -41,6 +40,14 @@ Item {
             const id = modelName || root.daemon.modelType;
             root.daemon.installModel(id, true);
             return "re-downloading model: " + id;
+        }
+
+        function removeModel(modelName: string): string {
+            if (!root.daemon)
+                return "daemon not ready";
+            const id = modelName || root.daemon.modelType;
+            root.daemon.removeModel(id);
+            return "removing model: " + id;
         }
 
         function uninstall(): string {
@@ -156,18 +163,6 @@ Item {
             }
         }
 
-        function debugMode(state: string): string {
-            if (!root.daemon)
-                return "daemon not ready";
-            const value = (state || "").toLowerCase();
-            if (value !== "on" && value !== "true" && value !== "1"
-                    && value !== "off" && value !== "false" && value !== "0")
-                return "usage: dms ipc call depthscape debugMode on|off";
-            const enabled = value === "on" || value === "true" || value === "1";
-            root.daemon.setDebugMode(enabled);
-            return "debug mode " + (enabled ? "enabled" : "disabled");
-        }
-
         function renderProbe(screenName: string, outDir: string): string {
             if (!root.daemon || !outDir)
                 return JSON.stringify({ "ok": false, "error": "missing daemon or outDir" });
@@ -195,6 +190,28 @@ Item {
                 });
             }
             return JSON.stringify({ "ok": false, "error": "screen not found" });
+        }
+
+        /// Per-screen geometry as the QML side sees it, plus the cap derived
+        /// from it. `--max-dimension` and mask sizes are otherwise unexplainable
+        /// from the outside.
+        function screenDimensions(): string {
+            const out = {};
+            for (const screen of Quickshell.screens) {
+                const dpr = (screen.devicePixelRatio && screen.devicePixelRatio > 0)
+                    ? screen.devicePixelRatio : 1;
+                out[screen.name] = {
+                    "width": screen.width,
+                    "height": screen.height,
+                    "dpr": dpr,
+                    "compositorScale": (CompositorService.getScreenScale ? CompositorService.getScreenScale(screen) : dpr),
+                    "scaledLongEdge": root.daemon ? root.daemon.screenScaledLongEdge(screen) : 0
+                };
+            }
+            return JSON.stringify({
+                "screens": out,
+                "maxDeviceDimension": root.daemon ? root.daemon.maxDeviceDimension() : 0
+            });
         }
 
         function debug(): string {
@@ -250,9 +267,29 @@ Item {
                     "spatialDisplayActive": group.spatialDisplayActive === true,
                     "bothSpatialScenesReady": group.bothSpatialScenesReady === true,
                     "wallpaperSpatialReady": wpRef ? wpRef.spatialSceneReady === true : false,
+                    "spatialPhotoPath": wpRef ? wpRef.spatialPhotoPath : "",
+                    "imageZoom": wpRef ? wpRef.spatialZoom : 0,
                     "wallpaperNativeReady": wpRef ? wpRef.spatialNativeReady === true : false,
                     "wallpaperNativeStatus": wpRef ? wpRef.spatialNativeStatus : 0,
                     "foregroundSpatialReady": fgRef ? fgRef.spatialSceneReady === true : false,
+                    // Which wallpaper/mask pair the foreground layer is actually
+                    // painting. The daemon row is replaced atomically and always
+                    // pairs correctly, so a visible misalignment can only come
+                    // from this internal pair lagging behind it.
+                    "fgCurrentWp": fgRef ? fgRef.currentWp : "",
+                    "fgCurrentMask": fgRef ? fgRef.currentMask : "",
+                    "fgIncomingWp": fgRef ? fgRef.incomingWp : "",
+                    "fgIncomingMask": fgRef ? fgRef.incomingMask : "",
+                    "fgTransitioning": fgRef ? fgRef.isTransitioning === true : false,
+                    "fgProgress": fgRef ? fgRef.transitionProgress : 0,
+                    "fgWantedWp": fgRef ? fgRef.wallpaperPath : "",
+                    "fgWantedMask": fgRef ? fgRef.maskPath : "",
+                    "fgStatus": fgRef ? {
+                        "incomingWp": fgRef.incomingWpStatus,
+                        "incomingMask": fgRef.incomingMaskStatus,
+                        "currentWp": fgRef.currentWpStatus,
+                        "currentMask": fgRef.currentMaskStatus
+                    } : null,
                     "foregroundNativeReady": fgRef ? fgRef.spatialNativeReady === true : false,
                     "foregroundNativeStatus": fgRef ? fgRef.spatialNativeStatus : 0,
                     "spatialTracking": inputRef ? inputRef.trackingEnabled === true : false,

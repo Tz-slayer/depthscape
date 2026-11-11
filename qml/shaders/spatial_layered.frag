@@ -14,11 +14,13 @@ layout(std140, binding = 0) uniform buf {
     vec2 cropScale;
     vec2 backgroundTexel;
     float foregroundOnly;
+    float imageZoom;
 } ubuf;
 
 void main() {
     vec2 screen = (qt_TexCoord0 - vec2(0.5)) * 2.0;
-    vec2 uv = vec2(0.5) + screen * ubuf.cropScale * 0.46;
+    // Same enlargement the native mesh uses, so both paths frame alike.
+    vec2 uv = vec2(0.5) + screen * ubuf.cropScale * (0.5 / ubuf.imageZoom);
     vec2 sphere = screen * 0.42;
     float sphereZ = sqrt(max(0.01, 1.0 - dot(sphere, sphere)));
     float yaw = ubuf.pointer.x * 0.075;
