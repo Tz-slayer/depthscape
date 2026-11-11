@@ -412,8 +412,10 @@ PluginComponent {
         onTriggered: {
             if (!root.defaultModelProvisioning || root.reloadScheduled)
                 return;
-            // The reload would destroy this daemon and with it the build.
-            if (root.spatial3dBuilding) {
+            // The reload would destroy this daemon and with it the build or an
+            // in-flight analysis, and the surfaces would come back pointing at
+            // files that are still being written.
+            if (root.spatial3dBuilding || root.active !== null || root.queue.length > 0) {
                 provisioningReload.restart();
                 return;
             }
@@ -744,7 +746,9 @@ PluginComponent {
     }
 
     function pump() {
-        if (active !== null || !modelReady || enginePath === "")
+        // A model download owns the CPU and the spatial model may still be
+        // missing, so analysing now would only burn a failed inference.
+        if (active !== null || !modelReady || modelBusy || enginePath === "")
             return;
         let job = null;
         const remaining = queue.slice();
@@ -923,6 +927,13 @@ PluginComponent {
         return null;
     }
 
+    // Persisted outputs are the previous session's answer, but the files they
+    // name can be gone: a plugin update re-clones the directory (wiping .data)
+    // while DMS keeps plugin data, and an Image that failed to open a path
+    // never retries once the engine writes a new file under the same name.
+    // Restore a row only after every file it names has been confirmed on disk.
+    property var pendingRestore: ({})
+
     function loadInitialOutputs() {
         let map = pluginData.lastOutputs || null;
         if (typeof map === "string") {
@@ -935,39 +946,79 @@ PluginComponent {
         if (!map || typeof map !== "object")
             return;
 
-        const next = {};
+        const candidates = {};
+        const paths = [];
         const screens = Quickshell.screens;
         for (let i = 0; i < screens.length; i++) {
             const name = screens[i].name;
             const currentWp = wallpaperFor(name);
             const pKey = parametersKeyFor(name);
             const cached = lookupCachedEntry(map, name, currentWp, pKey);
-            if (cached && (!spatialEnabledFor(name) || root.spatialPathsPresent(cached))) {
-                next[name] = {
-                    "wallpaper": currentWp,
-                    "state": "ready",
-                    "maskPath": cached.maskPath,
-                    "bbox": Array.isArray(cached.bbox) ? cached.bbox : null,
-                    "width": cached.width || 0,
-                    "height": cached.height || 0,
-                    // Older pluginData entries predate the palette field;
-                    // an absent path is a valid "no sidecar yet" state that
-                    // auto mode falls out of gracefully.
-                    "palettePath": cached.palettePath || "",
-                    "spatialBackgroundPath": cached.spatialBackgroundPath || "",
-                    "spatialForegroundPath": cached.spatialForegroundPath || "",
-                    "spatialDepthPath": cached.spatialDepthPath || "",
-                    "spatialMattePath": cached.spatialMattePath || "",
-                    "spatialInfluencePath": cached.spatialInfluencePath || "",
-                    "message": cached.spatialWarning || "",
-                    "elapsedMs": 0,
-                    "cacheHit": true
-                };
+            if (!cached)
+                continue;
+            const spatial = spatialEnabledFor(name);
+            if (spatial && !spatialPathsPresent(cached))
+                continue;
+            const required = [cached.maskPath];
+            if (spatial) {
+                required.push(cached.spatialBackgroundPath, cached.spatialForegroundPath,
+                    cached.spatialDepthPath, cached.spatialMattePath, cached.spatialInfluencePath);
             }
+            candidates[name] = { "cached": cached, "required": required };
+            for (const path of required)
+                paths.push(path);
         }
-        if (Object.keys(next).length > 0) {
-            outputs = next;
+        if (paths.length === 0)
+            return;
+        root.pendingRestore = candidates;
+        initialOutputCheck.command = [
+            "sh", "-c", 'for f in "$@"; do [ -f "$f" ] && echo "$f"; done', "sh"
+        ].concat(paths);
+        initialOutputCheck.running = true;
+    }
+
+    function applyInitialOutputs(text) {
+        const existing = {};
+        const lines = text.split("\n");
+        for (let i = 0; i < lines.length; i++) {
+            const path = lines[i].trim();
+            if (path !== "")
+                existing[path] = true;
         }
+        const merged = {};
+        for (const key in outputs)
+            merged[key] = outputs[key];
+        for (const name in root.pendingRestore) {
+            if (merged[name])
+                continue;
+            const candidate = root.pendingRestore[name];
+            if (!candidate.required.every(path => existing[path] === true))
+                continue;
+            const cached = candidate.cached;
+            merged[name] = {
+                "wallpaper": wallpaperFor(name),
+                "state": "ready",
+                "maskPath": cached.maskPath,
+                "bbox": Array.isArray(cached.bbox) ? cached.bbox : null,
+                "width": cached.width || 0,
+                "height": cached.height || 0,
+                // Older pluginData entries predate the palette field;
+                // an absent path is a valid "no sidecar yet" state that
+                // auto mode falls out of gracefully.
+                "palettePath": cached.palettePath || "",
+                "spatialBackgroundPath": cached.spatialBackgroundPath || "",
+                "spatialForegroundPath": cached.spatialForegroundPath || "",
+                "spatialDepthPath": cached.spatialDepthPath || "",
+                "spatialMattePath": cached.spatialMattePath || "",
+                "spatialInfluencePath": cached.spatialInfluencePath || "",
+                "message": cached.spatialWarning || "",
+                "elapsedMs": 0,
+                "cacheHit": true
+            };
+        }
+        root.pendingRestore = ({});
+        if (Object.keys(merged).length > 0)
+            outputs = merged;
     }
 
     function persistLastOutput(screenName, wallpaper, paramsKey, maskPath, palettePath,
@@ -1022,10 +1073,6 @@ PluginComponent {
     function syncOutputs() {
         const next = {};
         const screens = Quickshell.screens;
-        let map = pluginData.lastOutputs || null;
-        if (typeof map === "string") {
-            try { map = JSON.parse(map); } catch (e) { map = null; }
-        }
         for (let index = 0; index < screens.length; index++) {
             const name = screens[index].name;
             const wallpaper = wallpaperFor(name);
@@ -1040,38 +1087,24 @@ PluginComponent {
                 if (active && active.screenName === name && analyzeProcess.running) {
                     analyzeProcess.running = false;
                 }
-                const pKey = parametersKeyFor(name);
-                const cached = lookupCachedEntry(map, name, wallpaper, pKey);
-                if (cached && (!spatialEnabledFor(name) || root.spatialPathsPresent(cached))) {
-                    row.maskPath = cached.maskPath;
-                    row.bbox = Array.isArray(cached.bbox) ? cached.bbox : null;
-                    row.width = cached.width || 0;
-                    row.height = cached.height || 0;
-                    row.palettePath = cached.palettePath || "";
-                    row.spatialBackgroundPath = cached.spatialBackgroundPath || "";
-                    row.spatialForegroundPath = cached.spatialForegroundPath || "";
-                    row.spatialDepthPath = cached.spatialDepthPath || "";
-                    row.spatialMattePath = cached.spatialMattePath || "";
-                    row.spatialInfluencePath = cached.spatialInfluencePath || "";
-                    row.state = "ready";
-                    row.cacheHit = true;
-                    row.message = cached.spatialWarning || "";
-                } else {
-                    row.maskPath = "";
-                    row.bbox = null;
-                    row.width = 0;
-                    row.height = 0;
-                    row.palettePath = "";
-                    row.spatialBackgroundPath = "";
-                    row.spatialForegroundPath = "";
-                    row.spatialDepthPath = "";
-                    row.spatialMattePath = "";
-                    row.spatialInfluencePath = "";
-                    row.message = "";
-                    row.elapsedMs = 0;
-                    row.cacheHit = false;
-                    row.state = wallpaper === "" ? "empty" : "pending";
-                }
+                // Reuse only happens on a cold start, where the files were
+                // verified first. A switch always re-runs the engine: the old
+                // wallpaper's files are pruned, so a remembered path here
+                // would be dead.
+                row.maskPath = "";
+                row.bbox = null;
+                row.width = 0;
+                row.height = 0;
+                row.palettePath = "";
+                row.spatialBackgroundPath = "";
+                row.spatialForegroundPath = "";
+                row.spatialDepthPath = "";
+                row.spatialMattePath = "";
+                row.spatialInfluencePath = "";
+                row.message = "";
+                row.elapsedMs = 0;
+                row.cacheHit = false;
+                row.state = wallpaper === "" ? "empty" : "pending";
             } else if (row.state === undefined) {
                 row.state = wallpaper === "" ? "empty" : "pending";
             }
@@ -1107,37 +1140,15 @@ PluginComponent {
     function syncParameters() {
         // A parameter change updates the split; DO NOT clear current paths.
         // Keeping the current surfaces visible prevents flickering while
-        // the engine computes the new split asynchronously.
-        let map = pluginData.lastOutputs || null;
-        if (typeof map === "string") {
-            try { map = JSON.parse(map); } catch (e) { map = null; }
-        }
+        // the engine computes the new split asynchronously. Remembered paths
+        // are not reused here: they were produced by different parameters.
         const next = {};
         for (const name in outputs) {
             const row = {};
             for (const key in outputs[name])
                 row[key] = outputs[name][key];
-            if (row.wallpaper) {
-                const pKey = parametersKeyFor(name);
-                const cached = lookupCachedEntry(map, name, row.wallpaper, pKey);
-                if (cached && (!spatialEnabledFor(name) || root.spatialPathsPresent(cached))) {
-                    row.maskPath = cached.maskPath;
-                    row.bbox = Array.isArray(cached.bbox) ? cached.bbox : null;
-                    row.width = cached.width || 0;
-                    row.height = cached.height || 0;
-                    row.palettePath = cached.palettePath || "";
-                    row.spatialBackgroundPath = cached.spatialBackgroundPath || "";
-                    row.spatialForegroundPath = cached.spatialForegroundPath || "";
-                    row.spatialDepthPath = cached.spatialDepthPath || "";
-                    row.spatialMattePath = cached.spatialMattePath || "";
-                    row.spatialInfluencePath = cached.spatialInfluencePath || "";
-                    row.state = "ready";
-                    row.cacheHit = true;
-                    row.message = cached.spatialWarning || "";
-                } else {
-                    row.state = row.maskPath ? "ready" : "pending";
-                }
-            }
+            if (row.wallpaper)
+                row.state = row.maskPath ? "ready" : "pending";
             next[name] = row;
         }
         outputs = next;
@@ -1253,6 +1264,15 @@ PluginComponent {
     function engineArgs(args) {
         const prefix = root.dataRoot !== "" ? ["--data-dir", root.dataRoot] : [];
         return [enginePath].concat(prefix, args);
+    }
+
+    Process {
+        id: initialOutputCheck
+
+        command: []
+        stdout: StdioCollector {
+            onStreamFinished: root.applyInitialOutputs(text)
+        }
     }
 
     Process {

@@ -217,6 +217,29 @@ if '/-matte\\.png$/, "-photo.png"' not in daemon:
 PY
 report "spatial photo layer naming matches its consumer" $?
 
+# A remembered output path can outlive its file: a plugin update re-clones the
+# directory (wiping .data) while DMS keeps plugin data. Handing such a path to
+# an Image leaves a permanently failed source, so reuse is gated on the file
+# actually being on disk, and the provisioning reload must not kill a running
+# analysis whose files the surfaces are already pointing at.
+python3 - <<'PY'
+import pathlib, re, sys
+daemon = pathlib.Path("qml/DepthDaemon.qml").read_text()
+if "initialOutputCheck.command" not in daemon or '[ -f "$f" ]' not in daemon:
+    print("persisted outputs are no longer verified on disk before reuse")
+    sys.exit(1)
+if len(re.findall(r'\blookupCachedEntry\s*\(', daemon)) != 2:
+    print("remembered mask paths are adopted outside the verified startup path")
+    sys.exit(1)
+if "required.every(path => existing[path] === true)" not in daemon:
+    print("restore no longer requires every named file to exist")
+    sys.exit(1)
+if "root.active !== null || root.queue.length > 0" not in daemon:
+    print("the provisioning reload can still interrupt an analysis")
+    sys.exit(1)
+PY
+report "persisted outputs are verified before reuse" $?
+
 # The native Quick3D module is compiled on the user's machine, so four files
 # have to agree on where it lands: the build script's DEST, the daemon's
 # presence check, the QML import path, and the qmldir module name. A rename in
