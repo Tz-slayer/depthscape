@@ -71,14 +71,9 @@ PanelWindow {
     /// False until the daemon has confirmed the native Quick3D module is
     /// installed; the scene keeps the shader fallback until then.
     property bool nativeModuleAvailable: false
-    /// Set while the daemon forces a restack. Changing the layer re-inserts
-    /// the surface at the top of Background when it returns, which fixes the
-    /// order against remapped desktop widgets without ever unmapping it -- an
-    /// unmap would be visible because this surface carries the 3D foreground.
-    property bool restackBounce: false
 
     WlrLayershell.namespace: "depthscape:foreground"
-    WlrLayershell.layer: root.restackBounce ? WlrLayer.Bottom : WlrLayer.Background
+    WlrLayershell.layer: WlrLayer.Background
     WlrLayershell.exclusiveZone: -1
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
 
