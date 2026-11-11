@@ -1695,7 +1695,10 @@ PluginComponent {
     }
 
     // Re-stack only DepthForeground (without destroying surfaces or unloading
-    // GPU textures) when desktop widgets finish editing or rebuild their layer order.
+    // GPU textures) when desktop widgets finish editing or rebuild their layer
+    // order. The surface is never hidden: it is moved to another layer for a
+    // couple of frames and back, which makes niri re-insert it on top of its
+    // layer. An unmap with the 3D foreground on is a visible flash.
     property bool foregroundRestacking: false
     property bool _bouncingWidgets: false
 
@@ -2275,8 +2278,8 @@ PluginComponent {
                         outputAspect: surfaces.modelData.width / Math.max(1, surfaces.modelData.height)
                         effectEnabled: surfaces.screenEffectEnabled
                         visible: surfaces.showForeground
-                            && (!root.foregroundRestacking || !surfaces.screenEffectEnabled)
                             && (surfaces.screenEffectEnabled || surfaces.screenSpatial)
+                        restackBounce: root.foregroundRestacking
                             && (foregroundPath !== "" || wallpaperPath !== "")
                         revealed: root.revealedOnce
                         maxTravel: surfaces.screenCanvasTravel
