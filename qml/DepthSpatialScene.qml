@@ -52,11 +52,16 @@ Item {
     readonly property bool hostVisible: surfaceVisible && windowVisible
     readonly property bool nativeReady: hostVisible && threeD.item && threeD.item.ready === true
     readonly property int nativeStatus: threeD.status
+    // The Quick3D module is built on this machine, possibly after the shell
+    // started. Importing it before it exists makes the engine cache the failed
+    // module lookup for the rest of the process, so the loader stays off until
+    // the daemon has confirmed the library is there.
+    property bool nativeModuleAvailable: true
     readonly property bool assetPathsReady: sourcePath !== ""
         && backgroundPath !== "" && depthPath !== "" && mattePath !== ""
         && influencePath !== "" && (!foreground || originalPath !== "")
     readonly property bool fallbackActive: spatialEnabled && assetPathsReady
-        && (threeD.status === Loader.Error || fallbackTimedOut)
+        && (!root.nativeModuleAvailable || threeD.status === Loader.Error || fallbackTimedOut)
     readonly property bool fallbackReady: fallbackActive
         && sourceTexture.status === Image.Ready
         && depthTexture.status === Image.Ready
@@ -198,7 +203,8 @@ Item {
     Loader {
         id: threeD
         anchors.fill: parent
-        active: root.spatialEnabled && root.assetPathsReady && root.nativeLoaderAllowed && root.hostVisible
+        active: root.spatialEnabled && root.assetPathsReady && root.nativeLoaderAllowed
+            && root.nativeModuleAvailable && root.hostVisible
         source: Qt.resolvedUrl("DepthWallpaper3D.qml")
         onStatusChanged: {
             if (status === Loader.Error)

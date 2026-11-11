@@ -109,6 +109,9 @@ PanelWindow {
 
     /// Downscaled photo for the 3D mesh's colour texture, supplied by the daemon.
     property string spatialPhotoPath: ""
+    /// False until the daemon has confirmed the native Quick3D module is
+    /// installed; the scene keeps the shader fallback until then.
+    property bool nativeModuleAvailable: false
 
     WlrLayershell.namespace: "depthscape:wallpaper"
     WlrLayershell.layer: WlrLayer.Background
@@ -158,7 +161,7 @@ PanelWindow {
     readonly property alias spatialSceneItem: spatialScene
     readonly property real spatialCameraPointerX: spatialScene.nativePointerX
     readonly property real spatialCameraPointerY: spatialScene.nativePointerY
-    readonly property real spatialZoom: spatialScene.nativeImageZoom
+    readonly property real spatialZoom: spatialScene.imageZoom
     readonly property real effectiveOutputAspect: root.screenWidth / Math.max(1, root.screenHeight)
     readonly property real effectiveSourceAspect: (root.imageWidth > 0 && root.imageHeight > 0)
         ? (root.imageWidth / root.imageHeight)
@@ -305,6 +308,7 @@ PanelWindow {
                 spatialTravel: root.spatialTravel
                 outputAspect: root.effectiveOutputAspect
                 sourceAspect: root.effectiveSourceAspect
+                nativeModuleAvailable: root.nativeModuleAvailable
             }
 
         // Overview blur. `anchors.fill: parent` inside the animated canvas

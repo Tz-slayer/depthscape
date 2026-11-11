@@ -217,6 +217,66 @@ if '/-matte\\.png$/, "-photo.png"' not in daemon:
 PY
 report "spatial photo layer naming matches its consumer" $?
 
+# The native Quick3D module is compiled on the user's machine, so four files
+# have to agree on where it lands: the build script's DEST, the daemon's
+# presence check, the QML import path, and the qmldir module name. A rename in
+# one place otherwise degrades spatial mode to the shader fallback silently.
+python3 - <<'PY'
+import pathlib, re, sys
+daemon = pathlib.Path("qml/DepthDaemon.qml").read_text()
+script = pathlib.Path("tools/build-spatial3d.sh").read_text()
+scene3d = pathlib.Path("qml/DepthWallpaper3D.qml").read_text()
+qmldir = pathlib.Path("engine/spatial3d/qmldir").read_text().strip().splitlines()
+cmake = pathlib.Path("engine/spatial3d/CMakeLists.txt").read_text()
+
+daemon_match = re.search(r'spatial3dSoPath: root\.pluginDir\s*\+\s*"([^"]+)"', daemon)
+if not daemon_match:
+    print("daemon no longer declares spatial3dSoPath as pluginDir + subpath")
+    sys.exit(1)
+subpath = daemon_match.group(1)
+if not subpath.startswith("/qml/native/Depthscape/Spatial3D/"):
+    print("unexpected spatial3d subpath:", subpath)
+    sys.exit(1)
+if 'DEST="$ROOT/qml/native/Depthscape/Spatial3D"' not in script:
+    print("build script installs somewhere other than qml/native/Depthscape/Spatial3D")
+    sys.exit(1)
+if 'import "native/Depthscape/Spatial3D" as Spatial3D' not in scene3d:
+    print("DepthWallpaper3D imports a different native module path")
+    sys.exit(1)
+if "module Depthscape.Spatial3D" not in qmldir or "depthscape_spatial3d" not in "\n".join(qmldir):
+    print("qmldir no longer declares module Depthscape.Spatial3D / plugin depthscape_spatial3d")
+    sys.exit(1)
+if not subpath.endswith("/libdepthscape_spatial3d.so"):
+    print("daemon checks for a different library name:", subpath)
+    sys.exit(1)
+if 'LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/qml/Depthscape/Spatial3D"' not in cmake:
+    print("CMake output directory does not match the installed module path")
+    sys.exit(1)
+# The marker must sit next to the output: it is what makes a re-cloned copy
+# retry the build, so storing it in plugin data would reintroduce the bug.
+if 'spatial3dAttemptMarker: root.pluginDir' not in daemon:
+    print("build-attempt marker is not anchored to the plugin directory")
+    sys.exit(1)
+PY
+report "native 3D module path, build script and qmldir agree" $?
+
+# A first run downloads both models, and the daemon only reads the new model
+# list after DMS recreates it. Keep the one-shot reload wired to the end of
+# provisioning instead of an unrelated status refresh.
+python3 - <<'PY'
+import pathlib, sys
+daemon = pathlib.Path("qml/DepthDaemon.qml").read_text()
+for needle in (
+    "defaultModelProvisioning = true",
+    "root.defaultModelProvisioning && root.defaultModelsPresent()",
+    "pluginService.reloadPlugin(pluginId)",
+):
+    if needle not in daemon:
+        print("missing first-run reload wiring:", needle)
+        sys.exit(1)
+PY
+report "first-run model provisioning reloads the plugin once" $?
+
 # `setup` is the one and only download entry point. A `model::download` call
 # anywhere else means a wallpaper change, a shell start or a spatial effect
 # silently fetches hundreds of megabytes the user never asked for.

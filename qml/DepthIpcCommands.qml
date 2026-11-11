@@ -151,6 +151,9 @@ Item {
                     "currentModelType": page.currentModelType,
                     "modelIcons": page.modelIcons,
                     "statusText": page.statusText,
+                    "spatial3dNeedsAttention": page.spatial3dNeedsAttention,
+                    "spatial3dBuilding": page.spatial3dBuilding,
+                    "spatial3dStatusText": page.spatial3dStatusText,
                     "engineCommand": page.engineCommand,
                     "buildCommand": page.buildCommand
                 });
@@ -310,6 +313,12 @@ Item {
                 "foregroundModels": root.daemon.foregroundModels,
                 "enginePath": root.daemon.enginePath,
                 "dataRoot": root.daemon.dataRoot,
+                "spatial3d": {
+                    "ready": root.daemon.spatial3dReady === true,
+                    "building": root.daemon.spatial3dBuilding === true,
+                    "problem": root.daemon.spatial3dProblem,
+                    "path": root.daemon.spatial3dSoPath
+                },
                 "niriLayerRule": root.daemon.layerRuleCheck,
                 "screens": screensOut,
                 "parallax": parallax

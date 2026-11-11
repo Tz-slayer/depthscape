@@ -68,6 +68,9 @@ PanelWindow {
     /// 3D scene samples that instead of the original wallpaper file.
     /// Downscaled photo for the 3D mesh's colour texture, supplied by the daemon.
     property string spatialPhotoPath: ""
+    /// False until the daemon has confirmed the native Quick3D module is
+    /// installed; the scene keeps the shader fallback until then.
+    property bool nativeModuleAvailable: false
 
     WlrLayershell.namespace: "depthscape:foreground"
     WlrLayershell.layer: WlrLayer.Background
@@ -572,6 +575,7 @@ PanelWindow {
                     spatialEnabled: root.spatialBuildActive
                     outputAspect: root.effectiveOutputAspect
                     sourceAspect: root.effectiveSourceAspect
+                    nativeModuleAvailable: root.nativeModuleAvailable
                 }
             }
         }

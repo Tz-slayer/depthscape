@@ -34,7 +34,7 @@ Depthscape estimates wallpaper depth locally to place desktop background widgets
 - **Niri** compositor (25.05+)
 - **curl**, used for the automatic engine and model download
 - *Optional*, only to build the engine yourself: **Rust & Cargo** and **OpenCV 5 development files**. OpenCV is linked statically, so it is **not** needed at runtime.
-- *Optional*: **Qt Quick3D development files** to build the native spatial mesh (`tools/build-spatial3d.sh`). Without it the spatial mode falls back to a lower-detail renderer.
+- *Optional*: **Qt Quick3D development files** and **cmake** for the native 3D mesh renderer. It is a Qt plugin, so it has to be compiled against your Qt — Depthscape builds it automatically on first run and offers **Build 3D Renderer** in the plugin settings. Without it, spatial mode falls back to a flat shader effect and the settings page says so.
 
 ---
 
@@ -83,6 +83,12 @@ cp target/release/depthscape-engine ../bin/depthscape-engine
 ```
 
 *(Requires OpenCV 5 development files; the engine links them statically. You can also use **Build Engine** in the plugin's Engine card, which only appears when something is missing.)*
+
+The native 3D renderer is a Qt Quick3D plugin compiled against the shell's own Qt,
+so it is built on your machine the first time Depthscape starts. If Qt Quick3D
+development files or cmake are missing, spatial mode uses a flat shader effect and
+the **Spatial Wallpaper** card shows a **Build 3D Renderer** button to retry after
+installing them.
 
 ### 3. 🎛️ Configure
 

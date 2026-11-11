@@ -1,15 +1,33 @@
 {
+  "3D renderer built. Spatial mode switches to the native mesh.": {
+    "3D renderer built. Spatial mode switches to the native mesh.": "3D 渲染器构建完成，空间壁纸已切换到原生网格渲染。"
+  },
+  "Build 3D Renderer": {
+    "Build 3D Renderer": "构建 3D 渲染器"
+  },
   "Build Engine": {
     "Build Engine": "构建引擎"
   },
   "Build failed (exit %1)": {
     "Build failed (exit %1)": "构建失败 (退出码 %1)"
   },
+  "Build failed (exit %1): %2": {
+    "Build failed (exit %1): %2": "构建失败（退出码 %1）：%2"
+  },
   "Building engine...": {
     "Building engine...": "正在构建引擎..."
   },
   "Building engine... %1": {
     "Building engine... %1": "正在构建引擎... %1"
+  },
+  "Building the 3D renderer...": {
+    "Building the 3D renderer...": "正在构建 3D 渲染器..."
+  },
+  "CMake is missing. Install cmake and a C++ toolchain, then build again.": {
+    "CMake is missing. Install cmake and a C++ toolchain, then build again.": "缺少 CMake。请安装 cmake 和 C++ 工具链后重试。"
+  },
+  "Compiles the Quick3D mesh plugin against this system's Qt. Needs cmake, a C++ compiler and Qt Quick3D development files.": {
+    "Compiles the Quick3D mesh plugin against this system's Qt. Needs cmake, a C++ compiler and Qt Quick3D development files.": "针对本机 Qt 编译 Quick3D 网格插件。需要 cmake、C++ 编译器以及 Qt Quick3D 开发文件。"
   },
   "Could not download prebuilt engine. Open plugin settings to retry or build from source.": {
     "Could not download prebuilt engine. Open plugin settings to retry or build from source.": "无法下载预编译引擎。请打开插件设置重试或从源码编译。"
@@ -31,6 +49,9 @@
   },
   "Depthscape requires curl to automatically download depth models and engine binaries.": {
     "Depthscape requires curl to automatically download depth models and engine binaries.": "Depthscape 需要 curl 来自动下载深度模型及引擎二进制文件。"
+  },
+  "Depthscape: 3D renderer not built": {
+    "Depthscape: 3D renderer not built": "Depthscape：3D 渲染器未构建"
   },
   "Depthscape: could not remove model data": {
     "Depthscape: could not remove model data": "Depthscape：无法移除模型数据"
@@ -92,6 +113,12 @@
   "Models not downloaded. Please select and download models.": {
     "Models not downloaded. Please select and download models.": "未下载模型。请在上方选择并下载模型。"
   },
+  "Native 3D renderer not built; spatial mode uses the flat shader fallback.": {
+    "Native 3D renderer not built; spatial mode uses the flat shader fallback.": "原生 3D 渲染器未构建，空间壁纸将回退为平面着色效果。"
+  },
+  "No C++ compiler found. Install a C++ toolchain, then build again.": {
+    "No C++ compiler found. Install a C++ toolchain, then build again.": "未找到 C++ 编译器。请安装 C++ 工具链后重试。"
+  },
   "Occlusion Threshold": {
     "Occlusion Threshold": "遮挡阈值"
   },
@@ -100,6 +127,9 @@
   },
   "Plugin is starting. Reopen this page in a moment.": {
     "Plugin is starting. Reopen this page in a moment.": "插件正在启动，请稍后重新打开此页面。"
+  },
+  "Qt Quick3D development files are missing. Install the Qt 6 Quick3D development package, then build again.": {
+    "Qt Quick3D development files are missing. Install the Qt 6 Quick3D development package, then build again.": "缺少 Qt Quick3D 开发文件。请安装 Qt 6 Quick3D 开发包后重试。"
   },
   "Re-check Engine": {
     "Re-check Engine": "重新检测引擎"

@@ -230,6 +230,19 @@ PluginSettings {
     readonly property var availableModels: root.daemonFound ? root.daemon.availableModels : []
     readonly property var foregroundModels: root.daemonFound ? root.daemon.foregroundModels : []
 
+    // Native 3D renderer. It is a Quick3D module compiled against this host's
+    // Qt, so it cannot ship as a binary; while it is absent the spatial mode
+    // falls back to a shader that only translates the image.
+    readonly property bool spatial3dReady: root.daemonFound && root.daemon.spatial3dReady === true
+    readonly property bool spatial3dBuilding: root.daemonFound && root.daemon.spatial3dBuilding === true
+    readonly property string spatial3dProblem: root.daemonFound ? (root.daemon.spatial3dProblem || "") : ""
+    readonly property bool spatial3dNeedsAttention: root.daemonFound && !root.spatial3dReady
+    readonly property string spatial3dStatusText: root.spatial3dBuilding
+        ? I18n.trFor("depthscape", "Building the 3D renderer...")
+        : (root.spatial3dProblem !== ""
+            ? root.spatial3dProblem
+            : I18n.trFor("depthscape", "Native 3D renderer not built; spatial mode uses the flat shader fallback."))
+
     // Fixed model pair, matching what the daemon provisions on first run.
     readonly property string currentModelType: "small"
     readonly property string selectedFgStatusId: "spatial-isnet-anime"
@@ -369,6 +382,64 @@ PluginSettings {
             settingKey: root.settingKeyFor("spatialEnabled")
             label: I18n.trFor("depthscape", "Spatial Wallpaper")
             defaultValue: false
+        }
+
+        SettingDivider {
+            visible: spatialToggle.value && root.spatial3dNeedsAttention
+        }
+
+        // Only while spatial is on: with the toggle off the fallback changes
+        // nothing the user can see, so the notice would be pure noise.
+        StyledRect {
+            id: spatial3dNotice
+            visible: spatialToggle.value && root.spatial3dNeedsAttention
+            width: parent.width
+            height: spatial3dColumn.implicitHeight + Theme.spacingM * 2
+            radius: Theme.cornerRadiusS
+            color: Theme.withAlpha(Theme.warning, 0.08)
+            border.color: Theme.withAlpha(Theme.warning, 0.3)
+            border.width: 1
+
+            Column {
+                id: spatial3dColumn
+                x: Theme.spacingM
+                y: Theme.spacingM
+                width: parent.width - Theme.spacingM * 2
+                spacing: Theme.spacingS
+
+                Row {
+                    width: parent.width
+                    spacing: Theme.spacingM
+
+                    DIcon {
+                        name: root.spatial3dBuilding ? "hourglass_empty" : "view_in_ar"
+                        size: 20
+                        color: Theme.warning
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+
+                    StyledText {
+                        width: parent.width - 20 - Theme.spacingM
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: root.spatial3dStatusText
+                        font.pixelSize: Theme.fontSizeSmall
+                        color: Theme.surfaceText
+                        wrapMode: Text.WordWrap
+                    }
+                }
+
+                DButton {
+                    text: I18n.trFor("depthscape", "Build 3D Renderer")
+                    iconName: "build"
+                    tooltipText: I18n.trFor("depthscape", "Compiles the Quick3D mesh plugin against this system's Qt. Needs cmake, a C++ compiler and Qt Quick3D development files.")
+                    busy: root.spatial3dBuilding
+                    enabled: !root.spatial3dBuilding
+                    onClicked: {
+                        if (root.daemon && root.daemon.buildSpatial3d)
+                            root.daemon.buildSpatial3d();
+                    }
+                }
+            }
         }
 
         SettingDivider {

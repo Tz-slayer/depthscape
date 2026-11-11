@@ -186,6 +186,140 @@ PluginComponent {
         return decodeURIComponent(url.replace(/^file:\/\//, "").replace(/\/$/, ""));
     }
 
+    // ---- native 3D renderer ------------------------------------------------
+    // The Quick3D mesh is a native QML plugin: it has to be built against the
+    // host's Qt (a prebuilt .so would not match the user's Qt ABI), so the
+    // source ships with the plugin and is compiled here once. Until it exists
+    // the spatial mode falls back to the shader path, which only translates a
+    // flat image -- the settings page says so instead of degrading silently.
+    readonly property string spatial3dSoPath: root.pluginDir
+        + "/qml/native/Depthscape/Spatial3D/libdepthscape_spatial3d.so"
+    // Lives beside the build output, not in plugin data: a re-cloned install
+    // loses both, and a stale flag in the settings store would then forbid the
+    // one automatic attempt that a fresh copy needs.
+    readonly property string spatial3dAttemptMarker: root.pluginDir
+        + "/qml/native/.spatial3d-build-attempted"
+    readonly property string spatial3dFallbackProblem:
+        I18n.trFor("depthscape", "Native 3D renderer not built; spatial mode uses the flat shader fallback.")
+    property bool spatial3dReady: false
+    property bool spatial3dBuilding: false
+    property string spatial3dProblem: ""
+    property string spatial3dStderr: ""
+
+    function refreshSpatial3dState() {
+        if (spatial3dCheck.running || root.spatial3dBuilding)
+            return;
+        spatial3dCheck.running = true;
+    }
+
+    function buildSpatial3d() {
+        if (root.spatial3dBuilding)
+            return;
+        root.spatial3dBuilding = true;
+        root.spatial3dProblem = "";
+        root.spatial3dStderr = "";
+        spatial3dBuild.running = true;
+    }
+
+    function spatial3dBuildFailure(exitCode) {
+        const detail = (root.spatial3dStderr !== "" ? root.spatial3dStderr
+            : (spatial3dBuild.stderr ? spatial3dBuild.stderr.text : "")) || "";
+        if (detail.indexOf("cmake is not installed") >= 0)
+            return I18n.trFor("depthscape", "CMake is missing. Install cmake and a C++ toolchain, then build again.");
+        if (detail.indexOf("No C++ compiler found") >= 0)
+            return I18n.trFor("depthscape", "No C++ compiler found. Install a C++ toolchain, then build again.");
+        if (detail.indexOf("Qt Quick3D development files") >= 0)
+            return I18n.trFor("depthscape", "Qt Quick3D development files are missing. Install the Qt 6 Quick3D development package, then build again.");
+        const lines = detail.split("\n").map(line => line.trim()).filter(line => line !== "");
+        if (lines.length > 0)
+            return I18n.trFor("depthscape", "Build failed (exit %1): %2").arg(exitCode).arg(lines[lines.length - 1]);
+        return I18n.trFor("depthscape", "Build failed (exit %1)").arg(exitCode);
+    }
+
+    /// Compile once per installed copy when possible. The marker keeps a
+    /// machine without Qt6 Quick3D development files from retrying on every
+    /// shell start; the settings button retries explicitly.
+    function ensureSpatial3d() {
+        if (root.spatial3dReady || root.spatial3dBuilding)
+            return;
+        // Never race the model download for CPU, and never have the post-model
+        // reload destroy this daemon in the middle of a build.
+        if (root.modelBusy || root.defaultModelQueue.length > 0) {
+            spatial3dDefer.restart();
+            return;
+        }
+        spatial3dMarkAttempt.running = true;
+        root.buildSpatial3d();
+    }
+
+    Timer {
+        id: spatial3dDefer
+        interval: 20 * 1000
+        repeat: false
+        onTriggered: root.ensureSpatial3d()
+    }
+
+    Process {
+        id: spatial3dMarkAttempt
+
+        command: ["sh", "-c", 'mkdir -p "$(dirname "$1")" && : > "$1"', "sh", root.spatial3dAttemptMarker]
+    }
+
+    Process {
+        id: spatial3dCheck
+
+        command: [
+            "sh", "-c",
+            'if [ -f "$1" ]; then echo ready; ' +
+            'elif [ -f "$2" ]; then echo attempted; ' +
+            'else echo missing; fi',
+            "sh", root.spatial3dSoPath, root.spatial3dAttemptMarker
+        ]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                const state = text.trim();
+                root.spatial3dReady = state === "ready";
+                if (root.spatial3dReady) {
+                    root.spatial3dProblem = "";
+                    return;
+                }
+                if (root.spatial3dProblem === "")
+                    root.spatial3dProblem = root.spatial3dFallbackProblem;
+                if (state === "missing")
+                    root.ensureSpatial3d();
+            }
+        }
+    }
+
+    Process {
+        id: spatial3dBuild
+
+        command: ["bash", root.pluginDir + "/tools/build-spatial3d.sh"]
+        onExited: exitCode => {
+            root.spatial3dBuilding = false;
+            if (exitCode === 0) {
+                root.spatial3dReady = true;
+                root.spatial3dProblem = "";
+                // The surfaces only import the module once this flips, so the
+                // first import attempt happens with the library already there.
+                if (typeof ToastService !== "undefined" && ToastService.showInfo) {
+                    ToastService.showInfo(I18n.trFor("depthscape", "Depthscape"),
+                        I18n.trFor("depthscape", "3D renderer built. Spatial mode switches to the native mesh."),
+                        "", "depthscape-spatial3d-ready");
+                }
+                return;
+            }
+            root.spatial3dProblem = root.spatial3dBuildFailure(exitCode);
+            if (typeof ToastService !== "undefined" && ToastService.showWarning) {
+                ToastService.showWarning(I18n.trFor("depthscape", "Depthscape: 3D renderer not built"),
+                    root.spatial3dProblem, "", "depthscape-spatial3d-fail");
+            }
+        }
+        stderr: StdioCollector {
+            onStreamFinished: root.spatial3dStderr = text
+        }
+    }
+
     property string enginePath: ""
     property string engineProblem: ""
     property bool downloadingEngine: false
@@ -207,6 +341,10 @@ PluginComponent {
     property var defaultModelQueue: []
     property bool defaultModelFailed: false
     property int defaultModelAttempts: 0
+    // A fresh install only starts working once the shell has re-read the
+    // daemon with the models on disk, so provisioning ends in one reload.
+    property bool defaultModelProvisioning: false
+    property bool reloadScheduled: false
 
     function defaultModelsPresent() {
         for (const id of root.defaultModelIds) {
@@ -228,6 +366,7 @@ PluginComponent {
         if (root.defaultModelAttempts >= 2)
             return;
         root.defaultModelAttempts += 1;
+        root.defaultModelProvisioning = true;
         root.defaultModelQueue = root.defaultModelIds.filter(id => !root.isModelReady(id));
         if (root.defaultModelQueue.length === 0)
             return;
@@ -263,6 +402,26 @@ PluginComponent {
             root.defaultModelFailed = false;
             root.defaultModelAttempts = 0;
             root.ensureDefaultModels();
+        }
+    }
+
+    Timer {
+        id: provisioningReload
+        interval: 1200
+        repeat: false
+        onTriggered: {
+            if (!root.defaultModelProvisioning || root.reloadScheduled)
+                return;
+            // The reload would destroy this daemon and with it the build.
+            if (root.spatial3dBuilding) {
+                provisioningReload.restart();
+                return;
+            }
+            if (!pluginService || !pluginService.reloadPlugin)
+                return;
+            root.reloadScheduled = true;
+            console.info("Depthscape: default models provisioned, reloading plugin");
+            pluginService.reloadPlugin(pluginId);
         }
     }
 
@@ -1112,6 +1271,8 @@ PluginComponent {
                 root.availableModels = parsed && parsed.availableModels ? parsed.availableModels : [];
                 root.foregroundModels = parsed && parsed.foregroundModels ? parsed.foregroundModels : [];
                 root.ensureDefaultModels();
+                if (root.defaultModelProvisioning && root.defaultModelsPresent())
+                    provisioningReload.restart();
                 root.currentModelInfo = parsed && parsed.model ? parsed.model : null;
                 if (parsed && parsed.dataDir)
                     root.dataRoot = parsed.dataDir;
@@ -2056,6 +2217,7 @@ PluginComponent {
                         spatialMattePath: root.spatialMatteFor(surfaces.screenName)
                         spatialInfluencePath: root.spatialInfluenceFor(surfaces.screenName)
                         spatialPhotoPath: root.spatialPhotoFor(surfaces.screenName)
+                        nativeModuleAvailable: root.spatial3dReady
                         spatialPointerX: spatialInput.pointerX
                         spatialPointerY: spatialInput.pointerY
                         spatialTravel: surfaces.screenSpatialTravel
@@ -2083,6 +2245,7 @@ PluginComponent {
                         mattePath: root.spatialMatteFor(surfaces.screenName)
                         influencePath: root.spatialInfluenceFor(surfaces.screenName)
                         spatialPhotoPath: root.spatialPhotoFor(surfaces.screenName)
+                        nativeModuleAvailable: root.spatial3dReady
                         spatialEnabled: surfaces.screenSpatial
                         spatialAssetsReady: surfaces.screenSpatialAssetsExist
                         spatialDisplayActive: surfaces.spatialDisplayActive
@@ -2137,6 +2300,7 @@ PluginComponent {
         root._lastModelType = root.modelType;
         root._lastParametersSignature = root.allParametersSignature();
         root.checkCompositorLayerRule();
+        root.refreshSpatial3dState();
         // A button pressed while the settings page was waiting for the daemon
         // leaves an `action` in plugin data. Replay it once at startup instead
         // of leaving it stranded until the next unrelated settings change.
