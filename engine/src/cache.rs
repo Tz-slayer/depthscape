@@ -9,8 +9,7 @@
 use crate::config::{
     Paths, DEPTH_CACHE_LIMIT, DEPTH_PIPELINE_VERSION, INPUT_SIZE, MASK_CACHE_LIMIT,
     MASK_PIPELINE_VERSION, MODEL_FINGERPRINT, PALETTE_CACHE_LIMIT, PALETTE_PIPELINE_VERSION,
-    REFINED_CACHE_LIMIT, SPATIAL_CACHE_LIMIT, SPATIAL_FOREGROUND_FEATHER,
-    SPATIAL_FOREGROUND_THRESHOLD, SPATIAL_PIPELINE_VERSION,
+    REFINED_CACHE_LIMIT, SPATIAL_CACHE_LIMIT,
 };
 use anyhow::{bail, Context, Result};
 use std::fs;
@@ -57,12 +56,6 @@ pub fn mask_key(depth_key: &str, threshold: f32, feather: f32) -> String {
 /// invalidate it short of deleting the cache.
 pub fn palette_key(wallpaper_hash: &str) -> String {
     format!("{wallpaper_hash}-p{PALETTE_PIPELINE_VERSION}")
-}
-
-pub fn spatial_key(depth_key: &str, segment_fingerprint: &str) -> String {
-    format!(
-        "{depth_key}-seg{segment_fingerprint}-s{SPATIAL_PIPELINE_VERSION}-t{SPATIAL_FOREGROUND_THRESHOLD:.4}-f{SPATIAL_FOREGROUND_FEATHER:.4}",
-    )
 }
 
 /// Write bytes to `path` via a temporary file in the same directory.
@@ -222,45 +215,6 @@ pub struct CacheEntry {
     pub depth_path: PathBuf,
     pub refined_path: PathBuf,
     pub mask_path: PathBuf,
-}
-
-pub struct SpatialCacheEntry {
-    pub background_path: PathBuf,
-    pub foreground_path: PathBuf,
-    pub depth_path: PathBuf,
-    pub matte_path: PathBuf,
-    pub influence_path: PathBuf,
-    /// Downscaled photo, used as the 3D mesh's colour texture.
-    pub photo_path: PathBuf,
-    pub complete_path: PathBuf,
-}
-
-impl SpatialCacheEntry {
-    pub fn resolve(paths: &Paths, depth_key: &str, segment_fingerprint: &str) -> Self {
-        let key = spatial_key(depth_key, segment_fingerprint);
-        Self {
-            background_path: paths.spatial_cache().join(format!("{key}-background.png")),
-            foreground_path: paths.spatial_cache().join(format!("{key}-foreground.png")),
-            depth_path: paths.spatial_cache().join(format!("{key}-depth.png")),
-            matte_path: paths.spatial_cache().join(format!("{key}-matte.png")),
-            influence_path: paths.spatial_cache().join(format!("{key}-influence.png")),
-            photo_path: paths.spatial_cache().join(format!("{key}-photo.png")),
-            complete_path: paths.spatial_cache().join(format!("{key}-complete")),
-        }
-    }
-
-    pub fn is_cached(&self) -> bool {
-        // `photo` is what the 3D scene samples; a set without it is from a
-        // build that uploaded the original wallpaper instead, so make it
-        // regenerate rather than serve a mix.
-        self.complete_path.is_file()
-            && self.photo_path.is_file()
-            && self.background_path.is_file()
-            && self.foreground_path.is_file()
-            && self.depth_path.is_file()
-            && self.matte_path.is_file()
-            && self.influence_path.is_file()
-    }
 }
 
 impl CacheEntry {

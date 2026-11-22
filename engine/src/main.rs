@@ -1,4 +1,4 @@
-//! `depthscape-engine` — offline depth, widget-mask and spatial-layer producer for Depthscape.
+//! `depthscape-engine` — offline depth and widget-mask producer for Depthscape.
 //!
 //! One invocation does one job and prints one JSON object. The engine never
 //! renders and never talks to the compositor; it only turns a wallpaper into
@@ -12,9 +12,6 @@ mod model;
 mod palette;
 mod pipeline;
 mod protocol;
-mod spatial_assets;
-mod spatial_ops;
-mod spatial_segment;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -25,7 +22,7 @@ use std::path::PathBuf;
 #[command(
     name = "depthscape-engine",
     version,
-    about = "Prepare depth-aware masks and optional spatial wallpaper layers"
+    about = "Prepare depth-aware masks"
 )]
 struct Cli {
     /// Plugin data directory. Defaults to $XDG_DATA_HOME/depthscape.
@@ -74,14 +71,6 @@ enum Command {
         #[arg(long, default_value = "small")]
         model: String,
 
-        /// Prepare foreground/background textures for spatial wallpaper rendering.
-        #[arg(long, default_value_t = false)]
-        spatial: bool,
-
-        /// Foreground model for the spatial layers (isnet, isnet-anime, birefnet-lite, birefnet).
-        #[arg(long, default_value = "isnet")]
-        spatial_model: String,
-
         /// Wallpapers still displayed on some screen. Cached artefacts for any
         /// other wallpaper are deleted after this analysis; repeat once per
         /// screen. Omitting the flag keeps the cache untouched.
@@ -89,18 +78,17 @@ enum Command {
         keep: Vec<PathBuf>,
 
         /// Largest long-edge resolution any display can show. The wallpaper is
-        /// downscaled to it before any tier runs, so masks, palettes and the
-        /// spatial layers stay proportional to the screen instead of the file.
+        /// downscaled to it before any tier runs, so masks, palettes stay proportional to the screen instead of the file.
         #[arg(long, value_name = "PX")]
         max_dimension: Option<u32>,
     },
 
-    /// Delete every cached depth, mask, palette, and spatial asset.
+    /// Delete every cached depth, mask and palette asset.
     ClearCache,
 
     /// Remove a single downloaded model to free disk space.
     RemoveModel {
-        /// Model ID to remove (e.g. small, base, large, isnet, birefnet-lite).
+        /// Model ID to remove (e.g. small, base, large).
         #[arg(long)]
         model: String,
     },
@@ -154,23 +142,10 @@ fn main() -> Result<()> {
             threshold,
             feather,
             model,
-            spatial,
-            spatial_model,
             keep,
             max_dimension,
         } => {
             let descriptor = config::find_model(&model).ok_or_else(|| model_err(&model))?;
-            let segment_descriptor =
-                config::find_spatial_model(&spatial_model).ok_or_else(|| {
-                    let available = config::SPATIAL_MODELS
-                        .iter()
-                        .map(|desc| desc.id)
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    anyhow::anyhow!(
-                        "unknown spatial model '{spatial_model}'; available: {available}"
-                    )
-                })?;
             let wallpaper = wallpaper
                 .canonicalize()
                 .with_context(|| format!("cannot resolve {}", wallpaper.display()))?;
@@ -178,8 +153,6 @@ fn main() -> Result<()> {
                 wallpaper,
                 threshold,
                 feather,
-                spatial,
-                spatial_model: segment_descriptor,
                 model: descriptor,
                 max_dimension,
             };

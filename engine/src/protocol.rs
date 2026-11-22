@@ -18,10 +18,6 @@ pub struct StatusReport {
     pub ready: bool,
     pub model: ModelInfo,
     pub availableModels: Vec<ModelOption>,
-    /// Foreground/segmentation models used by the optional spatial mode. Kept
-    /// separate from `availableModels` because they are not depth models and
-    /// must never be offered as a value of the `modelType` setting.
-    pub foregroundModels: Vec<ModelOption>,
     pub cache: CacheInfo,
     pub dataDir: String,
 }
@@ -61,13 +57,6 @@ pub struct AnalyzeReport {
     /// Sidecar JSON with the wallpaper-derived text / accent / secondary
     /// hex colours the Clock widget's auto theme paints with.
     pub palettePath: String,
-    pub spatialBackgroundPath: String,
-    pub spatialForegroundPath: String,
-    pub spatialDepthPath: String,
-    pub spatialMattePath: String,
-    pub spatialInfluencePath: String,
-    pub spatialError: Option<String>,
-    pub spatialWarning: Option<String>,
     /// Wallpaper dimensions — also the mask's, by construction.
     pub width: u32,
     pub height: u32,
@@ -128,19 +117,6 @@ pub fn status(paths: &Paths, descriptor: &ModelDescriptor) -> anyhow::Result<Sta
         });
     }
 
-    let mut foreground_models = Vec::new();
-    for m in config::SPATIAL_MODELS {
-        let m_ready = model::state(paths, m)
-            .map(|s| s == ModelState::Ready)
-            .unwrap_or(false);
-        foreground_models.push(ModelOption {
-            id: m.id.to_string(),
-            name: m.name.to_string(),
-            size: m.total_size(),
-            ready: m_ready,
-        });
-    }
-
     Ok(StatusReport {
         ready: state == ModelState::Ready,
         model: ModelInfo {
@@ -153,7 +129,6 @@ pub fn status(paths: &Paths, descriptor: &ModelDescriptor) -> anyhow::Result<Sta
             path: paths.model_for(descriptor).display().to_string(),
         },
         availableModels: available_models,
-        foregroundModels: foreground_models,
         cache: CacheInfo {
             depthEntries: count_files(&paths.depth_cache()),
             refinedEntries: count_files(&paths.refined_cache()),
@@ -190,33 +165,6 @@ impl From<AnalyzeOutcome> for AnalyzeReport {
             maskPath: outcome.mask_path.display().to_string(),
             wallpaperPath: outcome.wallpaper_path.display().to_string(),
             palettePath: outcome.palette_path.display().to_string(),
-            spatialBackgroundPath: outcome
-                .spatial_background_path
-                .as_ref()
-                .map(|path| path.display().to_string())
-                .unwrap_or_default(),
-            spatialForegroundPath: outcome
-                .spatial_foreground_path
-                .as_ref()
-                .map(|path| path.display().to_string())
-                .unwrap_or_default(),
-            spatialDepthPath: outcome
-                .spatial_depth_path
-                .as_ref()
-                .map(|path| path.display().to_string())
-                .unwrap_or_default(),
-            spatialMattePath: outcome
-                .spatial_matte_path
-                .as_ref()
-                .map(|path| path.display().to_string())
-                .unwrap_or_default(),
-            spatialInfluencePath: outcome
-                .spatial_influence_path
-                .as_ref()
-                .map(|path| path.display().to_string())
-                .unwrap_or_default(),
-            spatialError: outcome.spatial_error,
-            spatialWarning: outcome.spatial_warning,
             width: outcome.width,
             height: outcome.height,
             bbox: outcome.bbox,

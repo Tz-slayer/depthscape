@@ -18,7 +18,6 @@
 | `effectEnabled_<屏幕>` | `ToggleSetting` | `true` | 该屏的景深遮挡开关 |
 | `threshold_<屏幕>` | `SliderSetting` | `30` % | 该屏的遮挡阈值 |
 | `feather_<屏幕>` | `SliderSetting` | `8` px | 该屏的边缘羽化 |
-| `spatialEnabled_<屏幕>` | `ToggleSetting` | `false` | 该屏的空间 3D 网格效果 |
 | `modelType` | `DDropdown`（Model） | `small` | 深度模型 id，**全局**（模型只有一份），**只提供三个 Depth Anything V2 变体**（Small / Base / Large）；每个选项左侧用圆形图标表示下载状态——圆圈内的 ✓ 为已下载，空心圆为未下载 |
 
 > 屏幕专属键**始终优先**于不带后缀的全局键（不再依赖 DMS 的"每个显示器单独壁纸"
@@ -79,7 +78,7 @@
 
 ### 逐屏隔离
 
-显示配置按输出独立：`effectEnabled_<屏幕>`、`parallaxEnabled_<屏幕>`、`spatialEnabled_<屏幕>`、`spatialTravel_<屏幕>`、五个平移视差参数、`threshold_<屏幕>`、`feather_<屏幕>`、`fg_*_<屏幕>`，以及布局条目里的 `visible` / `occlude`。在 DP-3 上打开景深、平移视差或空间壁纸不会改动 DP-1。
+显示配置按输出独立：`effectEnabled_<屏幕>`、`parallaxEnabled_<屏幕>`、五个平移视差参数、`threshold_<屏幕>`、`feather_<屏幕>`、`fg_*_<屏幕>`，以及布局条目里的 `visible` / `occlude`。在 DP-3 上打开景深或平移视差不会改动 DP-1。
 
 不带屏幕后缀的 `effectEnabled`、`parallaxEnabled`、`threshold`、`feather` 等只作为“该屏幕还没有独立配置时”的默认值；设置界面在预览某个输出时只写该输出的键。`modelType` / `autoGenerate` 仍是全局的，因为模型文件只有一份。
 
@@ -136,7 +135,7 @@ background widget。没有滑杆、没有表单。
   组件 + 遮罩），点卡片切换 stage。画廊提供本地壁纸选择，不会改写组件布局。
 * **stage**：完整 16:9 实况。右上「遮罩 / 原图」分段切换（原型是纯净/桌面/窗口），
   工具行第三颗是「构图辅助线」（三分线，只作用于预览）。
-* **检查器**：背景效果 / 组件两种属性页。壁纸选择和切换集中在左侧画廊；背景页只放视差、空间壁纸和**景深遮罩**区块——遮罩是壁纸派生的 modifier，不是图层；效果关闭时整个遮罩区块隐藏。时钟的字体预设渲染成原型那种
+* **检查器**：背景效果 / 组件两种属性页。壁纸选择和切换集中在左侧画廊；背景页只放视差和**景深遮罩**区块——遮罩是壁纸派生的 modifier，不是图层；效果关闭时整个遮罩区块隐藏。时钟的字体预设渲染成原型那种
   2×2 风格卡片（样张用各自的真实字体），颜色渲染成色板条；其余 schema 键走
   细轨滑杆 / 开关 / 内联下拉。
 * **图层列表**：只有两类真实图层——`背景底图`（锁定在底部）和 `组件`。组件行支持双击重命名、眼睛显隐、`遮挡/置顶`开关和拖拽排序；列表按 Photoshop 习惯把最上层放在最上面。遮罩不占图层行，它作用于所有 `occlude != false` 的组件。
@@ -224,9 +223,7 @@ dms ipc call depthscape settings     # 切换开关
 
 | 键                 | 界面标签              | 默认     | 范围  | 作用                                                |
 | ----------------- | ----------------- | ------ | --- | ------------------------------------------------- |
-| `parallaxEnabled_<屏幕>` | Workspace translation parallax | `true` | 开关  | 切换工作区时，让该输出的场景——壁纸、遮罩与 widget——滑过一小段屏幕。与空间壁纸互斥。 |
-| `spatialEnabled_<屏幕>` | Spatial wallpaper | `false` | 开关  | 生成深度网格、前景遮罩、近景影响图与背景补洞贴图；鼠标移动驱动相机视角。与工作区平移视差互斥。构建 Quick3D 插件后使用完整深度网格；未构建时退回分层着色器。 |
-| `spatialTravel_<屏幕>` | Spatial motion | `3` | 1–8 % | 鼠标驱动相机运动的强度：1% 约为 0.4° 水平 / 0.3° 垂直，默认 3% 约为 1.2° / 0.9°。启用空间壁纸时会为当前显示器准备图层。 |
+| `parallaxEnabled_<屏幕>` | Workspace translation parallax | `true` | 开关  | 切换工作区时，让该输出的场景——壁纸、遮罩与 widget——滑过一小段屏幕。 |
 
 全部事件驱动：插件只响应合成器的工作区事件，从不轮询。
 
@@ -471,7 +468,3 @@ layer-rule {
 
 启动自检会跟随 Niri 配置的 `include`，并在 `debug` 的 `niriLayerRule` 中报告
 `ok`、`partial`、`missing` 或 `unknown`。
-
-空间壁纸在桌面空白区域跟随鼠标。输入使用单独的透明 surface，命名空间为
-`depthscape-spatial-input`，不要将它放入 backdrop；指针进入应用窗口时，
-场景保持最后的位置。该 surface 会转发 DMS 的桌面右键菜单操作。

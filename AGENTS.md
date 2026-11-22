@@ -6,11 +6,10 @@
 
 ## 1. 项目简介与技术栈
 
-Depthscape 是针对 **Dux Shell (DMS)** 与 **Niri** 合成器的深度感知壁纸插件，提供桌面组件景深遮挡（iOS 风格）与指针驱动的交互式 3D 空间壁纸效果。
+Depthscape 是针对 **Dux Shell (DMS)** 与 **Niri** 合成器的深度感知壁纸插件，提供桌面组件景深遮挡（iOS 风格）。
 
 - **UI 层**：QML / Qt6 + Quickshell，基于 DMS 的 `PluginSettings`、`qs.Common`、`qs.DCommon.Widgets`。
-- **计算引擎**：Rust（`engine/`），基于 ONNX Runtime（`ort`）本地离线运行 Depth Anything V2 与 IS-Net / BiRefNet 模型，输出掩码与 3D 网格。
-- **3D 渲染**：Qt Quick3D（`engine/spatial3d/`）。
+- **计算引擎**：Rust（`engine/`），基于 ONNX Runtime（`ort`）本地离线运行 Depth Anything V2 模型，输出深度图与掩码。
 - **合成器规则**：Wayland 命名空间 `^depthscape:`，需在 Niri 中配置 `place-within-backdrop true`。
 
 ---
@@ -27,7 +26,7 @@ Depthscape 是针对 **Dux Shell (DMS)** 与 **Niri** 合成器的深度感知�
 
 ### 2.2. 插件独有词汇与翻译规范（私有词库）
 
-如果该名词为插件独有概念、算法模型特定词汇或无法在 dux-shell 原生词库中复用的长句文案（例如 `"Depth Wallpaper"`、`"Occlusion Threshold"`、`"Edge Feather"`、`"Spatial Wallpaper"`、`"Depth Anything V2"` 等）：
+如果该名词为插件独有概念、算法模型特定词汇或无法在 dux-shell 原生词库中复用的长句文案（例如 `"Depth Wallpaper"`、`"Occlusion Threshold"`、`"Edge Feather"`、`"Depth Anything V2"` 等）：
 
 1. **必须使用 `I18n.trFor("depthscape", ...)`**：
    - 严禁对插件私有词汇使用裸 `I18n.tr(...)`。
@@ -51,9 +50,6 @@ Depthscape 是针对 **Dux Shell (DMS)** 与 **Niri** 合成器的深度感知�
        },
        "Edge Feather": {
          "Edge Feather": "边缘羽化"
-       },
-       "Spatial Wallpaper": {
-         "Spatial Wallpaper": "空间壁纸"
        },
        "Build failed (exit %1)": {
          "Build failed (exit %1)": "构建失败 (退出码 %1)"

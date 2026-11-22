@@ -166,10 +166,8 @@ fi
 echo
 echo "=== model download policy ==="
 
-# Models are no longer user-selectable: the daemon pins one depth model and one
-# matting model, and provisions exactly those on first run. Keep the engine's
-# catalogue, the pinned pair and the download list in agreement, and keep the
-# settings page free of a model picker (that is what "hidden" means).
+# Keep the depth model catalogue and the daemon's default in agreement, and
+# keep the settings page free of a model picker.
 python3 - <<'PY'
 import pathlib, re, sys
 rust = pathlib.Path("engine/src/config.rs").read_text()
@@ -184,38 +182,21 @@ if items != ["MODEL_SMALL", "MODEL_BASE", "MODEL_LARGE"]:
 
 pinned = {
     'readonly property string modelType: "small"': "depth model",
-    'readonly property string spatialModel: "isnet-anime"': "matting model",
 }
 for needle, label in pinned.items():
     if needle not in daemon:
         print(f"daemon must pin the {label} with: {needle}")
         sys.exit(1)
 
-if 'defaultModelIds: ["small", "spatial-isnet-anime"]' not in daemon:
-    print("daemon must auto-provision exactly [small, spatial-isnet-anime]")
+if 'defaultModelIds: ["small"]' not in daemon:
+    print("daemon must auto-provision the small depth model")
     sys.exit(1)
 
 if re.search(r'modelIds\s*:', settings):
     print("settings page must not expose a model catalogue any more")
     sys.exit(1)
 PY
-report "fixed model pair is pinned and auto-provisioned" $?
-
-# The 3D scene samples the engine's downscaled photo. QML derives its path from
-# the matte path, so the engine's naming and that derivation have to stay in
-# lockstep or the mesh silently loses its colour texture.
-python3 - <<'PY'
-import pathlib, sys
-rust = pathlib.Path("engine/src/cache.rs").read_text()
-daemon = pathlib.Path("qml/DepthDaemon.qml").read_text()
-if '-photo.png' not in rust:
-    print("engine no longer writes <key>-photo.png")
-    sys.exit(1)
-if '/-matte\\.png$/, "-photo.png"' not in daemon:
-    print("daemon no longer derives the photo path from the matte path")
-    sys.exit(1)
-PY
-report "spatial photo layer naming matches its consumer" $?
+report "depth model is pinned" $?
 
 # A remembered output path can outlive its file: a plugin update re-clones the
 # directory (wiping .data) while DMS keeps plugin data. Handing such a path to
@@ -240,50 +221,7 @@ if "root.active !== null || root.queue.length > 0" not in daemon:
 PY
 report "persisted outputs are verified before reuse" $?
 
-# The native Quick3D module is compiled on the user's machine, so four files
-# have to agree on where it lands: the build script's DEST, the daemon's
-# presence check, the QML import path, and the qmldir module name. A rename in
-# one place otherwise degrades spatial mode to the shader fallback silently.
-python3 - <<'PY'
-import pathlib, re, sys
-daemon = pathlib.Path("qml/DepthDaemon.qml").read_text()
-script = pathlib.Path("tools/build-spatial3d.sh").read_text()
-scene3d = pathlib.Path("qml/DepthWallpaper3D.qml").read_text()
-qmldir = pathlib.Path("engine/spatial3d/qmldir").read_text().strip().splitlines()
-cmake = pathlib.Path("engine/spatial3d/CMakeLists.txt").read_text()
-
-daemon_match = re.search(r'spatial3dSoPath: root\.pluginDir\s*\+\s*"([^"]+)"', daemon)
-if not daemon_match:
-    print("daemon no longer declares spatial3dSoPath as pluginDir + subpath")
-    sys.exit(1)
-subpath = daemon_match.group(1)
-if not subpath.startswith("/qml/native/Depthscape/Spatial3D/"):
-    print("unexpected spatial3d subpath:", subpath)
-    sys.exit(1)
-if 'DEST="$ROOT/qml/native/Depthscape/Spatial3D"' not in script:
-    print("build script installs somewhere other than qml/native/Depthscape/Spatial3D")
-    sys.exit(1)
-if 'import "native/Depthscape/Spatial3D" as Spatial3D' not in scene3d:
-    print("DepthWallpaper3D imports a different native module path")
-    sys.exit(1)
-if "module Depthscape.Spatial3D" not in qmldir or "depthscape_spatial3d" not in "\n".join(qmldir):
-    print("qmldir no longer declares module Depthscape.Spatial3D / plugin depthscape_spatial3d")
-    sys.exit(1)
-if not subpath.endswith("/libdepthscape_spatial3d.so"):
-    print("daemon checks for a different library name:", subpath)
-    sys.exit(1)
-if 'LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/qml/Depthscape/Spatial3D"' not in cmake:
-    print("CMake output directory does not match the installed module path")
-    sys.exit(1)
-# The marker must sit next to the output: it is what makes a re-cloned copy
-# retry the build, so storing it in plugin data would reintroduce the bug.
-if 'spatial3dAttemptMarker: root.pluginDir' not in daemon:
-    print("build-attempt marker is not anchored to the plugin directory")
-    sys.exit(1)
-PY
-report "native 3D module path, build script and qmldir agree" $?
-
-# A first run downloads both models, and the daemon only reads the new model
+# A first run downloads the model, and the daemon only reads the new model
 # list after DMS recreates it. Keep the one-shot reload wired to the end of
 # provisioning instead of an unrelated status refresh.
 python3 - <<'PY'
@@ -301,7 +239,7 @@ PY
 report "first-run model provisioning reloads the plugin once" $?
 
 # `setup` is the one and only download entry point. A `model::download` call
-# anywhere else means a wallpaper change, a shell start or a spatial effect
+# anywhere else means a wallpaper change or shell start
 # silently fetches hundreds of megabytes the user never asked for.
 python3 - <<'PY'
 import glob, pathlib, re, sys

@@ -28,15 +28,6 @@ PluginSettings {
     property string buildOutput: ""
     property string chosenScreen: ""
 
-    readonly property bool fgModelReady: {
-        const list = root.foregroundModels || [];
-        for (let i = 0; i < list.length; i++) {
-            if (list[i].id === root.selectedFgStatusId)
-                return list[i].ready === true;
-        }
-        return false;
-    }
-
     function lookupDaemon() {
         if (typeof PluginService === "undefined" || !PluginService)
             return false;
@@ -193,16 +184,14 @@ PluginSettings {
     function reloadChildValues() {
         if (displayPicker && displayPicker.loadValue)
             displayPicker.loadValue();
+        if (layerPicker && layerPicker.loadValue)
+            layerPicker.loadValue();
         if (effectToggle && effectToggle.loadValue)
             effectToggle.loadValue();
         if (thresholdSlider && thresholdSlider.loadValue)
             thresholdSlider.loadValue();
         if (featherSlider && featherSlider.loadValue)
             featherSlider.loadValue();
-        if (spatialToggle && spatialToggle.loadValue)
-            spatialToggle.loadValue();
-        if (spatialTravelSlider && spatialTravelSlider.loadValue)
-            spatialTravelSlider.loadValue();
     }
 
     Component.onCompleted: {
@@ -226,26 +215,10 @@ PluginSettings {
     readonly property string engineProblem: root.daemonFound ? (root.daemon.engineProblem || "") : ""
     /// Everything the engine card can act on. Ready means the card stays hidden.
     readonly property bool engineNeedsAttention: !root.daemonFound || !root.engineFound
-        || root.modelBusy || !root.modelReady || !root.fgModelReady || root.engineProblem !== ""
+        || root.modelBusy || !root.modelReady || root.engineProblem !== ""
     readonly property var availableModels: root.daemonFound ? root.daemon.availableModels : []
-    readonly property var foregroundModels: root.daemonFound ? root.daemon.foregroundModels : []
 
-    // Native 3D renderer. It is a Quick3D module compiled against this host's
-    // Qt, so it cannot ship as a binary; while it is absent the spatial mode
-    // falls back to a shader that only translates the image.
-    readonly property bool spatial3dReady: root.daemonFound && root.daemon.spatial3dReady === true
-    readonly property bool spatial3dBuilding: root.daemonFound && root.daemon.spatial3dBuilding === true
-    readonly property string spatial3dProblem: root.daemonFound ? (root.daemon.spatial3dProblem || "") : ""
-    readonly property bool spatial3dNeedsAttention: root.daemonFound && !root.spatial3dReady
-    readonly property string spatial3dStatusText: root.spatial3dBuilding
-        ? I18n.trFor("depthscape", "Building the 3D renderer...")
-        : (root.spatial3dProblem !== ""
-            ? root.spatial3dProblem
-            : I18n.trFor("depthscape", "Native 3D renderer not built; spatial mode uses the flat shader fallback."))
-
-    // Fixed model pair, matching what the daemon provisions on first run.
     readonly property string currentModelType: "small"
-    readonly property string selectedFgStatusId: "spatial-isnet-anime"
 
     readonly property string pluginRoot: Qt.resolvedUrl("..").toString()
         .replace(/^file:\/\//, "").replace(/\/$/, "")
@@ -272,13 +245,9 @@ PluginSettings {
             const modelName = info ? info.name : (target || I18n.trFor("depthscape", "model"));
             return I18n.trFor("depthscape", "Working on %1").arg(modelName);
         }
-        if (!root.modelReady && !root.fgModelReady)
-            return I18n.trFor("depthscape", "Models not downloaded. Please select and download models.");
         if (!root.modelReady)
             return I18n.trFor("depthscape", "Depth model not downloaded.");
-        if (!root.fgModelReady)
-            return I18n.trFor("depthscape", "Matting model not downloaded.");
-        return I18n.trFor("depthscape", "Ready · Depth model and matting model are ready.");
+        return I18n.trFor("depthscape", "Ready · Depth model is ready.");
     }
 
     readonly property string statusIcon: root.downloadingEngine ? "hourglass_empty"
@@ -286,24 +255,22 @@ PluginSettings {
         : !root.daemonFound ? "hourglass_empty"
         : !root.engineFound ? "download"
         : root.modelBusy ? "hourglass_empty"
-        : (root.modelReady && root.fgModelReady) ? "check_circle" : "info"
+        : (root.modelReady) ? "check_circle" : "info"
 
     readonly property color statusColor: {
         if (!root.engineFound)
             return (root.buildOutput !== "" && !root.buildingEngine && !root.downloadingEngine) ? Theme.error : Theme.warning;
         if (root.modelBusy || root.buildingEngine || root.downloadingEngine)
             return Theme.warning;
-        if (!root.modelReady || !root.fgModelReady)
+        if (!root.modelReady)
             return Theme.warning;
         return Theme.primary;
     }
 
     // ---------------------------------------------------------------- UI Layout
 
-    // Display Selection
+    // Display Selection & Layer
     SettingsCard {
-        visible: root.screens.length > 1
-
         SectionTitle {
             text: I18n.tr("Display")
             icon: "desktop_windows"
@@ -313,12 +280,31 @@ PluginSettings {
 
         PluginDropdownRow {
             id: displayPicker
+            visible: root.screens.length > 1
             settingKey: "targetScreen"
             label: I18n.tr("Display")
             defaultValue: root.defaultScreenName
             options: root.displayScreenNames
             optionValues: root.displayScreenNames
         }
+
+        SettingDivider {
+            visible: root.screens.length > 1
+        }
+
+        PluginDropdownRow {
+            id: layerPicker
+            settingKey: root.settingKeyFor("displayLayer")
+            label: I18n.trFor("depthscape", "Foreground Layer")
+            defaultValue: root.daemonFound && String(root.daemon.displayLayer).toLowerCase() === "background"
+                ? "background" : "bottom"
+            options: [
+                I18n.trFor("depthscape", "Background"),
+                I18n.trFor("depthscape", "Bottom")
+            ]
+            optionValues: ["background", "bottom"]
+        }
+
     }
 
     // Depth Wallpaper
@@ -368,97 +354,7 @@ PluginSettings {
         }
     }
 
-    // Spatial Wallpaper
-    SettingsCard {
-        SectionTitle {
-            text: I18n.trFor("depthscape", "Spatial Wallpaper")
-            icon: "view_in_ar"
-        }
-
-        SettingDivider {}
-
-        PluginToggleRow {
-            id: spatialToggle
-            settingKey: root.settingKeyFor("spatialEnabled")
-            label: I18n.trFor("depthscape", "Spatial Wallpaper")
-            defaultValue: false
-        }
-
-        SettingDivider {
-            visible: spatialToggle.value && root.spatial3dNeedsAttention
-        }
-
-        // Only while spatial is on: with the toggle off the fallback changes
-        // nothing the user can see, so the notice would be pure noise.
-        StyledRect {
-            id: spatial3dNotice
-            visible: spatialToggle.value && root.spatial3dNeedsAttention
-            width: parent.width
-            height: spatial3dColumn.implicitHeight + Theme.spacingM * 2
-            radius: Theme.cornerRadiusS
-            color: Theme.withAlpha(Theme.warning, 0.08)
-            border.color: Theme.withAlpha(Theme.warning, 0.3)
-            border.width: 1
-
-            Column {
-                id: spatial3dColumn
-                x: Theme.spacingM
-                y: Theme.spacingM
-                width: parent.width - Theme.spacingM * 2
-                spacing: Theme.spacingS
-
-                Row {
-                    width: parent.width
-                    spacing: Theme.spacingM
-
-                    DIcon {
-                        name: root.spatial3dBuilding ? "hourglass_empty" : "view_in_ar"
-                        size: 20
-                        color: Theme.warning
-                        anchors.verticalCenter: parent.verticalCenter
-                    }
-
-                    StyledText {
-                        width: parent.width - 20 - Theme.spacingM
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: root.spatial3dStatusText
-                        font.pixelSize: Theme.fontSizeSmall
-                        color: Theme.surfaceText
-                        wrapMode: Text.WordWrap
-                    }
-                }
-
-                DButton {
-                    text: I18n.trFor("depthscape", "Build 3D Renderer")
-                    iconName: "build"
-                    tooltipText: I18n.trFor("depthscape", "Compiles the Quick3D mesh plugin against this system's Qt. Needs cmake, a C++ compiler and Qt Quick3D development files.")
-                    busy: root.spatial3dBuilding
-                    enabled: !root.spatial3dBuilding
-                    onClicked: {
-                        if (root.daemon && root.daemon.buildSpatial3d)
-                            root.daemon.buildSpatial3d();
-                    }
-                }
-            }
-        }
-
-        SettingDivider {
-            visible: spatialToggle.value
-        }
-
-        PluginSliderRow {
-            id: spatialTravelSlider
-            visible: spatialToggle.value
-            settingKey: root.settingKeyFor("spatialTravel")
-            label: I18n.trFor("depthscape", "Parallax Amplitude")
-            defaultValue: 3
-            minimum: 0
-            maximum: 10
-            unit: "%"
-        }
-    }
-
-    // Engine recovery. The engine and both models are provisioned automatically,
+    // Engine recovery. The engine and depth model are provisioned automatically,
     // so in the normal case there is nothing to show and nothing to press -- the
     // card is rendered only when something actually needs the user.
     SettingsCard {

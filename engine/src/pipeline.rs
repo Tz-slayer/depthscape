@@ -1,11 +1,4 @@
-//! The end-to-end analysis pipeline: wallpaper in, an occlusion mask and an
-//! optional spatial asset bundle out.
-//!
-//! The regular depth effect produces a grayscale mask at the wallpaper's own
-//! resolution. Spatial mode additionally prepares bounded display textures and depth maps
-//! using the same depth inference and its own cache key. Neither output changes
-//! the other: widget occlusion still draws the original wallpaper, while the
-//! spatial renderer uses a softly filled background under a depth-derived matte.
+//! The end-to-end analysis pipeline: wallpaper in, occlusion mask and palette out.
 
 use crate::cache::{self, CacheEntry};
 use crate::config::{Paths, GUIDED_FILTER_EPSILON, GUIDED_FILTER_RADIUS};
@@ -18,7 +11,7 @@ use image::{DynamicImage, RgbImage};
 use std::fs;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// A single analysis request, mirroring the V1 CLI surface.
 #[derive(Debug, Clone)]
@@ -28,10 +21,6 @@ pub struct AnalyzeRequest {
     pub threshold: f32,
     /// Symmetric transition half-width in `0.0..=0.5`.
     pub feather: f32,
-    /// Whether to prepare the independently rendered spatial wallpaper layers.
-    pub spatial: bool,
-    /// Foreground model used for the spatial matte.
-    pub spatial_model: &'static crate::config::ModelDescriptor,
     pub model: &'static crate::config::ModelDescriptor,
     /// Long-edge cap, in pixels, applied to the decoded wallpaper before any
     /// tier runs. The daemon passes the largest device resolution it has.
@@ -46,13 +35,6 @@ pub struct AnalyzeOutcome {
     /// Wallpaper-derived palette sidecar. Always present after a successful
     /// run: the pipeline either reused a cached JSON or wrote a new one.
     pub palette_path: PathBuf,
-    pub spatial_background_path: Option<PathBuf>,
-    pub spatial_foreground_path: Option<PathBuf>,
-    pub spatial_depth_path: Option<PathBuf>,
-    pub spatial_matte_path: Option<PathBuf>,
-    pub spatial_influence_path: Option<PathBuf>,
-    pub spatial_error: Option<String>,
-    pub spatial_warning: Option<String>,
     /// Wallpaper dimensions — also the mask's, by construction.
     pub width: u32,
     pub height: u32,
@@ -119,24 +101,6 @@ pub fn sanitise(threshold: f32, feather: f32) -> (f32, f32) {
     (threshold.clamp(0.0, 1.0), feather.clamp(0.0, 0.5))
 }
 
-/// Keep an offline GrabCut fallback usable without making a transient model
-/// failure permanent. Retry sooner if the model was installed in the meantime.
-///
-/// The warning is built from the descriptor's *name*, which is
-/// "IS-Net Anime (168 MiB) unavailable (...)"; matching the whole
-/// "IS-Net Anime unavailable" phrase never matched a real warning. Anchor on
-/// the model family prefix instead.
-fn is_isnet_fallback_warning(warning: Option<&str>) -> bool {
-    warning.is_some_and(|message| {
-        message.starts_with("IS-Net Anime") && message.contains("unavailable")
-    })
-}
-
-fn retry_isnet_fallback(warning: Option<&str>, model_ready: bool, age: Option<Duration>) -> bool {
-    is_isnet_fallback_warning(warning)
-        && (model_ready || age.is_some_and(|elapsed| elapsed >= Duration::from_secs(15 * 60)))
-}
-
 pub fn analyze(paths: &Paths, request: &AnalyzeRequest) -> Result<AnalyzeOutcome> {
     let started = Instant::now();
     if !request.wallpaper.is_file() {
@@ -180,7 +144,7 @@ pub fn analyze(paths: &Paths, request: &AnalyzeRequest) -> Result<AnalyzeOutcome
         bail!("wallpaper has invalid dimensions");
     }
     // Cap the source once, here. Every tier below reads this image, so depth,
-    // refinement, mask, palette and the spatial layers all end up proportional
+    // refinement, mask and palette all end up proportional
     // to what a display can show rather than to the file's native resolution.
     let (source_width, source_height) =
         imageops::cap_to_dimension(file_width, file_height, request.max_dimension);
@@ -202,15 +166,7 @@ pub fn analyze(paths: &Paths, request: &AnalyzeRequest) -> Result<AnalyzeOutcome
         feather,
     );
 
-    let (model_width, model_height) = match request.model.kind {
-        crate::config::ModelKind::DepthAnything | crate::config::ModelKind::DepthAnythingV3 => {
-            imageops::inference_size(source_width, source_height)
-        }
-        crate::config::ModelKind::BiRefNet | crate::config::ModelKind::SpatialIsNet => (
-            crate::config::BIREFNET_INPUT_SIZE,
-            crate::config::BIREFNET_INPUT_SIZE,
-        ),
-    };
+    let (model_width, model_height) = imageops::inference_size(source_width, source_height);
     let (refine_width, refine_height) = imageops::refine_size(source_width, source_height);
 
     // --- the common case --------------------------------------------------
@@ -233,33 +189,7 @@ pub fn analyze(paths: &Paths, request: &AnalyzeRequest) -> Result<AnalyzeOutcome
     let mut depth_cache_hit = entry.depth_path.is_file();
     let mut refined_cache_hit = entry.refined_path.is_file();
 
-    let spatial_entry = cache::SpatialCacheEntry::resolve(
-        paths,
-        &cache::depth_key_with_fingerprint(&cache_hash, request.model.fingerprint),
-        request.spatial_model.fingerprint,
-    );
-    let cached_warning = fs::read_to_string(&spatial_entry.complete_path)
-        .ok()
-        .and_then(|value| value.strip_prefix("warning\n").map(str::to_owned));
-    let has_transient_warning = is_isnet_fallback_warning(cached_warning.as_deref());
-    let model_ready = has_transient_warning
-        && model::state(paths, request.spatial_model)
-            .is_ok_and(|state| state == model::ModelState::Ready);
-    let marker_age = fs::metadata(&spatial_entry.complete_path)
-        .ok()
-        .and_then(|meta| meta.modified().ok())
-        .and_then(|modified| modified.elapsed().ok());
-    let recoverable_cache =
-        retry_isnet_fallback(cached_warning.as_deref(), model_ready, marker_age);
-    let spatial_cache_hit = request.spatial && spatial_entry.is_cached() && !recoverable_cache;
-    let mut spatial_ready = spatial_cache_hit;
-    let mut spatial_error = None;
-    let mut spatial_warning = if spatial_cache_hit {
-        cached_warning
-    } else {
-        None
-    };
-    if !mask_cache_hit || (request.spatial && !spatial_cache_hit) {
+    if !mask_cache_hit {
         // --- depth tier ---------------------------------------------------
         // A lazy decode is charged to `decode_ms`, not to the tier that
         // happened to need it, so the stages stay mutually exclusive.
@@ -399,58 +329,6 @@ pub fn analyze(paths: &Paths, request: &AnalyzeRequest) -> Result<AnalyzeOutcome
             )?;
             timings.mask_ms = stage.elapsed().as_millis();
         }
-
-        if request.spatial && !spatial_cache_hit {
-            let result = (|| -> Result<Option<String>> {
-                // A failed replacement must never leave an old completion
-                // marker beside a mixture of old and new files.
-                if spatial_entry.complete_path.exists() {
-                    fs::remove_file(&spatial_entry.complete_path)?;
-                }
-                let source = ensure_source(
-                    &mut source_rgb,
-                    &mut timings,
-                    &request.wallpaper,
-                    (source_width, source_height),
-                )?;
-                let spatial_depth = imageops::resize_cubic(
-                    &depth,
-                    model_width,
-                    model_height,
-                    source_width,
-                    source_height,
-                );
-                let prepared = crate::spatial_assets::prepare(
-                    paths,
-                    source,
-                    &spatial_depth,
-                    request.spatial_model,
-                )?;
-                cache::atomic_write(&spatial_entry.background_path, &prepared.background)?;
-                cache::atomic_write(&spatial_entry.foreground_path, &prepared.foreground)?;
-                cache::atomic_write(&spatial_entry.depth_path, &prepared.depth)?;
-                cache::atomic_write(&spatial_entry.matte_path, &prepared.matte)?;
-                cache::atomic_write(&spatial_entry.influence_path, &prepared.influence)?;
-                cache::atomic_write(&spatial_entry.photo_path, &prepared.photo)?;
-                let marker = match &prepared.warning {
-                    Some(warning) => format!("warning\n{warning}"),
-                    None => "complete\n".to_string(),
-                };
-                cache::atomic_write(&spatial_entry.complete_path, marker.as_bytes())?;
-                Ok(prepared.warning)
-            })();
-            match result {
-                Ok(warning) => {
-                    spatial_ready = true;
-                    spatial_warning = warning;
-                }
-                Err(error) => {
-                    let message = format!("{error:#}");
-                    eprintln!("Depthscape: spatial assets unavailable: {message}");
-                    spatial_error = Some(message);
-                }
-            }
-        }
     }
 
     // --- palette sidecar --------------------------------------------------
@@ -486,33 +364,6 @@ pub fn analyze(paths: &Paths, request: &AnalyzeRequest) -> Result<AnalyzeOutcome
         mask_path: entry.mask_path,
         wallpaper_path: request.wallpaper.clone(),
         palette_path,
-        spatial_background_path: if spatial_ready {
-            Some(spatial_entry.background_path)
-        } else {
-            None
-        },
-        spatial_foreground_path: if spatial_ready {
-            Some(spatial_entry.foreground_path)
-        } else {
-            None
-        },
-        spatial_depth_path: if spatial_ready {
-            Some(spatial_entry.depth_path)
-        } else {
-            None
-        },
-        spatial_matte_path: if spatial_ready {
-            Some(spatial_entry.matte_path)
-        } else {
-            None
-        },
-        spatial_influence_path: if spatial_ready {
-            Some(spatial_entry.influence_path)
-        } else {
-            None
-        },
-        spatial_error,
-        spatial_warning,
         width: source_width,
         height: source_height,
         bbox,
@@ -619,34 +470,6 @@ fn refine_at_resolution(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn isnet_download_fallback_retries_after_backoff_or_model_recovery() {
-        let warning = Some(
-            "IS-Net Anime unavailable (network error); using depth-guided foreground segmentation",
-        );
-        assert!(!retry_isnet_fallback(
-            warning,
-            false,
-            Some(Duration::from_secs(899))
-        ));
-        assert!(retry_isnet_fallback(
-            warning,
-            false,
-            Some(Duration::from_secs(900))
-        ));
-        assert!(retry_isnet_fallback(warning, true, Some(Duration::ZERO)));
-        assert!(!retry_isnet_fallback(
-            Some("IS-Net Anime subject did not pass depth validation"),
-            true,
-            Some(Duration::from_secs(3600))
-        ));
-        assert!(!retry_isnet_fallback(
-            None,
-            true,
-            Some(Duration::from_secs(3600))
-        ));
-    }
 
     #[test]
     fn sanitise_clamps_out_of_range_parameters() {

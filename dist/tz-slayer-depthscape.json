@@ -1,11 +1,11 @@
 {
     "id": "depthscape",
     "name": "Depthscape",
-    "version": "0.5.2",
+    "version": "0.6.0",
     "category": "appearance",
     "repo": "https://github.com/Tz-slayer/depthscape",
     "author": "Tz-slayer",
-    "description": "Depth-aware wallpaper occlusion and interactive 3D spatial parallax for Dux Shell.",
+    "description": "Depth-aware wallpaper occlusion for Dux Shell.",
     "capabilities": [
         "daemon"
     ],

@@ -151,9 +151,6 @@ Item {
                     "currentModelType": page.currentModelType,
                     "modelIcons": page.modelIcons,
                     "statusText": page.statusText,
-                    "spatial3dNeedsAttention": page.spatial3dNeedsAttention,
-                    "spatial3dBuilding": page.spatial3dBuilding,
-                    "spatial3dStatusText": page.spatial3dStatusText,
                     "engineCommand": page.engineCommand,
                     "buildCommand": page.buildCommand
                 });
@@ -188,8 +185,7 @@ Item {
                     "ok": true,
                     "screen": screenName,
                     "wpVisible": wp ? wp.visible : false,
-                    "fgVisible": fg ? fg.visible : false,
-                    "spatialDisplayActive": group.spatialDisplayActive === true
+                    "fgVisible": fg ? fg.visible : false
                 });
             }
             return JSON.stringify({ "ok": false, "error": "screen not found" });
@@ -226,13 +222,8 @@ Item {
                     "wallpaper": root.daemon.wallpaperFor(screen.name),
                     "mask": root.daemon.maskFor(screen.name),
                     "palette": root.daemon.paletteFor(screen.name),
-                    "spatialBackground": root.daemon.spatialBackgroundFor(screen.name),
-                    "spatialForeground": root.daemon.spatialForegroundFor(screen.name),
-                    "spatialDepth": root.daemon.spatialDepthFor(screen.name),
-                    "spatialMatte": root.daemon.spatialMatteFor(screen.name),
-                    "spatialInfluence": root.daemon.spatialInfluenceFor(screen.name),
                     "effectEnabled": root.daemon.effectEnabledFor(screen.name),
-                    "spatialEnabled": root.daemon.spatialEnabledFor(screen.name),
+                    "displayLayer": root.daemon.displayLayerFor(screen.name),
                     "parallax": {
                         "enabled": root.daemon.parallaxEnabledFor(screen.name),
                         "maxTravelPercent": root.daemon.parallaxMaxTravelPercentFor(screen.name),
@@ -249,7 +240,6 @@ Item {
                 const tracker = group.trackerRef;
                 const wpRef = group.wallpaperRef;
                 const fgRef = group.foregroundRef;
-                const inputRef = group.spatialInputRef;
                 parallax[group.modelData.name] = {
                     "screenName": group.modelData.name,
                     "targetIndex": tracker ? tracker.targetIndex : 0,
@@ -267,14 +257,6 @@ Item {
                     "wallpaperVisible": wpRef ? wpRef.visible : false,
                     "foregroundVisible": fgRef ? fgRef.visible : false,
                     "restackPending": root.daemon.restackPending === true,
-                    "spatialDisplayActive": group.spatialDisplayActive === true,
-                    "bothSpatialScenesReady": group.bothSpatialScenesReady === true,
-                    "wallpaperSpatialReady": wpRef ? wpRef.spatialSceneReady === true : false,
-                    "spatialPhotoPath": wpRef ? wpRef.spatialPhotoPath : "",
-                    "imageZoom": wpRef ? wpRef.spatialZoom : 0,
-                    "wallpaperNativeReady": wpRef ? wpRef.spatialNativeReady === true : false,
-                    "wallpaperNativeStatus": wpRef ? wpRef.spatialNativeStatus : 0,
-                    "foregroundSpatialReady": fgRef ? fgRef.spatialSceneReady === true : false,
                     // Which wallpaper/mask pair the foreground layer is actually
                     // painting. The daemon row is replaced atomically and always
                     // pairs correctly, so a visible misalignment can only come
@@ -293,16 +275,6 @@ Item {
                         "currentWp": fgRef.currentWpStatus,
                         "currentMask": fgRef.currentMaskStatus
                     } : null,
-                    "foregroundNativeReady": fgRef ? fgRef.spatialNativeReady === true : false,
-                    "foregroundNativeStatus": fgRef ? fgRef.spatialNativeStatus : 0,
-                    "spatialTracking": inputRef ? inputRef.trackingEnabled === true : false,
-                    "spatialHovered": inputRef ? inputRef.hovered === true : false,
-                    "pointerX": inputRef ? inputRef.pointerX : 0,
-                    "pointerY": inputRef ? inputRef.pointerY : 0,
-                    "cameraPointerX": wpRef ? wpRef.spatialCameraPointerX : 0,
-                    "cameraPointerY": wpRef ? wpRef.spatialCameraPointerY : 0,
-                    "spatialModel": root.daemon.spatialModel,
-                    "spatialTravelPercent": root.daemon.spatialTravelPercentFor(group.modelData.name)
                 };
             }
             return JSON.stringify({
@@ -310,15 +282,8 @@ Item {
                 "modelType": root.daemon.modelType,
                 "modelBusy": root.daemon.modelBusy,
                 "availableModels": root.daemon.availableModels,
-                "foregroundModels": root.daemon.foregroundModels,
                 "enginePath": root.daemon.enginePath,
                 "dataRoot": root.daemon.dataRoot,
-                "spatial3d": {
-                    "ready": root.daemon.spatial3dReady === true,
-                    "building": root.daemon.spatial3dBuilding === true,
-                    "problem": root.daemon.spatial3dProblem,
-                    "path": root.daemon.spatial3dSoPath
-                },
                 "niriLayerRule": root.daemon.layerRuleCheck,
                 "screens": screensOut,
                 "parallax": parallax

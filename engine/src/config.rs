@@ -13,8 +13,6 @@ pub const MODEL_REVISION: &str = "main";
 pub enum ModelKind {
     DepthAnything,
     DepthAnythingV3,
-    BiRefNet,
-    SpatialIsNet,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,8 +44,6 @@ impl ModelDescriptor {
 }
 
 /// Only three depth estimators are offered: the Depth Anything V2 family.
-/// V3 and BiRefNet are not depth-model options for this plugin; the BiRefNet
-/// descriptors below exist solely as optional spatial foreground segmenters.
 pub const MODEL_SMALL: ModelDescriptor = ModelDescriptor {
     id: "small",
     name: "Depth Anything V2 Small (99MB)",
@@ -87,62 +83,8 @@ pub const MODEL_LARGE: ModelDescriptor = ModelDescriptor {
     extra_file: None,
 };
 
-pub const MODEL_BIREFNET_LITE: ModelDescriptor = ModelDescriptor {
-    id: "birefnet-lite",
-    name: "BiRefNet Lite (224MB)",
-    kind: ModelKind::BiRefNet,
-    size: 224_005_088,
-    sha256: "5600024376f572a557870a5eb0afb1e5961636bef4e1e22132025467d0f03333",
-    fingerprint: "5600024376f572a5",
-    url: "https://huggingface.co/onnx-community/BiRefNet_lite-ONNX/resolve/main/onnx/model.onnx?download=true",
-    directory: "models/birefnet-lite",
-    filename: "model.onnx",
-    extra_file: None,
-};
-
-pub const MODEL_BIREFNET: ModelDescriptor = ModelDescriptor {
-    id: "birefnet",
-    name: "BiRefNet General (973MB)",
-    kind: ModelKind::BiRefNet,
-    size: 972_666_916,
-    sha256: "58f621f00f5d756097615970a88a791584600dcf7c45b18a0a6267535a1ebd3c",
-    fingerprint: "58f621f00f5d7560",
-    url: "https://huggingface.co/onnx-community/BiRefNet-ONNX/resolve/main/onnx/model.onnx?download=true",
-    directory: "models/birefnet",
-    filename: "model.onnx",
-    extra_file: None,
-};
-
-/// The spatial foreground model is independent from the selected depth model.
-pub const SPATIAL_ISNET_GENERAL: ModelDescriptor = ModelDescriptor {
-    id: "spatial-isnet",
-    name: "IS-Net General (170 MiB)",
-    kind: ModelKind::SpatialIsNet,
-    size: 178_648_008,
-    sha256: "60920e99c45464f2ba57bee2ad08c919a52bbf852739e96947fbb4358c0d964a",
-    fingerprint: "60920e99c45464f2",
-    url: "https://github.com/danielgatis/rembg/releases/download/v0.0.0/isnet-general-use.onnx",
-    directory: "models/isnet-general",
-    filename: "isnet-general-use.onnx",
-    extra_file: None,
-};
-
-pub const SPATIAL_ISNET_ANIME: ModelDescriptor = ModelDescriptor {
-    id: "spatial-isnet-anime",
-    name: "IS-Net Anime (168 MiB)",
-    kind: ModelKind::SpatialIsNet,
-    size: 176_069_933,
-    sha256: "f15622d853e8260172812b657053460e20806f04b9e05147d49af7bed31a6e99",
-    fingerprint: "f15622d853e82601",
-    url: "https://github.com/danielgatis/rembg/releases/download/v0.0.0/isnet-anime.onnx",
-    directory: "models/isnet-anime",
-    filename: "isnet-anime.onnx",
-    extra_file: None,
-};
-
 /// The complete set of depth estimators this plugin offers. `status` reports
-/// exactly these, `setup` only downloads these (plus spatial foreground
-/// models), and the settings page must expose nothing else.
+/// exactly these, and the settings page must expose nothing else.
 pub const ALL_MODELS: &[ModelDescriptor] = &[MODEL_SMALL, MODEL_BASE, MODEL_LARGE];
 
 pub fn default_model() -> &'static ModelDescriptor {
@@ -151,38 +93,8 @@ pub fn default_model() -> &'static ModelDescriptor {
 
 /// Resolve any model that can be fetched with `setup --model <id>`.
 ///
-/// Depth models come first and are limited to the three V2 variants. Spatial
-/// foreground segmenters are not depth estimators — they never appear in the
-/// depth-model picker — but they still have to be downloadable on demand for
-/// the optional spatial mode.
 pub fn find_model(id: &str) -> Option<&'static ModelDescriptor> {
-    ALL_MODELS
-        .iter()
-        .find(|m| m.id.eq_ignore_ascii_case(id))
-        .or_else(|| find_spatial_model(id))
-}
-
-/// Foreground models that may produce the spatial matte. The depth models are
-/// deliberately excluded: they estimate a field, they do not cut a subject.
-pub const SPATIAL_MODELS: &[&ModelDescriptor] = &[
-    &SPATIAL_ISNET_GENERAL,
-    &SPATIAL_ISNET_ANIME,
-    &MODEL_BIREFNET_LITE,
-    &MODEL_BIREFNET,
-];
-
-pub fn find_spatial_model(id: &str) -> Option<&'static ModelDescriptor> {
-    let id = if id.eq_ignore_ascii_case("isnet-anime") {
-        SPATIAL_ISNET_ANIME.id
-    } else if id.eq_ignore_ascii_case("isnet") || id.eq_ignore_ascii_case("isnet-general") {
-        SPATIAL_ISNET_GENERAL.id
-    } else {
-        id
-    };
-    SPATIAL_MODELS
-        .iter()
-        .copied()
-        .find(|model| model.id.eq_ignore_ascii_case(id))
+    ALL_MODELS.iter().find(|m| m.id.eq_ignore_ascii_case(id))
 }
 
 #[allow(dead_code)]
@@ -197,7 +109,6 @@ pub const MODEL_FINGERPRINT: &str = MODEL_SMALL.fingerprint;
 /// Model input is padded to a multiple of the ViT patch size.
 pub const INPUT_SIZE: u32 = 518;
 pub const PATCH_SIZE: u32 = 14;
-pub const BIREFNET_INPUT_SIZE: u32 = 1024;
 
 /// Bump when the depth post-processing changes (invalidates depth + refined).
 ///
@@ -218,13 +129,6 @@ pub const DEPTH_PIPELINE_VERSION: u32 = 2;
 /// `SPLIT_PIPELINE_VERSION` sequence: the artefact changed *shape*, so there is
 /// no cache entry from the old numbering that this could be confused with.
 pub const MASK_PIPELINE_VERSION: u32 = 1;
-/// Bump when any cached spatial wallpaper texture or field changes.
-pub const SPATIAL_PIPELINE_VERSION: u32 = 9;
-/// Bound spatial textures so two additional layers do not duplicate a 4K source.
-pub const SPATIAL_MAX_DIMENSION: u32 = 2560;
-/// Spatial cutout controls are independent from the desktop-widget occlusion sliders.
-pub const SPATIAL_FOREGROUND_THRESHOLD: f32 = 0.58;
-pub const SPATIAL_FOREGROUND_FEATHER: f32 = 0.08;
 pub const SPATIAL_CACHE_LIMIT: usize = 16;
 
 /// Bump when the wallpaper-derived palette changes shape or colour rules.

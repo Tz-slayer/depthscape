@@ -3,7 +3,7 @@ name = "depthscape-engine"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.88"
-description = "Depth-aware masks and optional spatial wallpaper layers for DankMaterialShell"
+description = "Depth-aware masks for Dux Shell"
 license = "MIT"
 
 [[bin]]
@@ -23,7 +23,6 @@ image = { version = "0.25", default-features = false, features = [
     "webp",
 ] }
 ort = "=2.0.0-rc.13"
-opencv = { version = "0.102", default-features = false, features = ["imgproc"] }
 ndarray = "0.17"
 rayon = "1.10"
 libc = "0.2"

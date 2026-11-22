@@ -47,8 +47,7 @@ PluginComponent {
     // page no longer exposes a switch, and the default is off. The code path
     // stays (it is woven through the canvas math) but nothing turns it on.
     readonly property bool parallaxEnabled: pluginData.parallaxEnabled ?? false
-    readonly property bool spatialEnabled: pluginData.spatialEnabled ?? false
-    readonly property string spatialModel: "isnet-anime"
+    readonly property string displayLayer: pluginData.displayLayer ?? "bottom"
     // Runtime-only: advanced controls are exposed only after an explicit CLI
     // command and reset to production defaults after the shell restarts.
     readonly property int parallaxStepPercent: pluginData.parallaxStep ?? 5
@@ -56,9 +55,6 @@ PluginComponent {
     readonly property int parallaxMaxTravelPercent: pluginData.parallaxMaxTravel ?? 25
     readonly property bool parallaxInverted: pluginData.parallaxInverted ?? false
     readonly property int parallaxDuration: Math.max(0, Math.min(1500, pluginData.parallaxDuration ?? 350))
-    readonly property int spatialPipelineVersion: 5
-    readonly property int defaultSpatialTravelPercent: 3
-    readonly property int spatialTravelPercent: pluginData.spatialTravel ?? defaultSpatialTravelPercent
 
     // How much faster the widgets drift than the wallpaper, as a percentage of
     // the wallpaper offset. 0% pins the widgets to the canvas (the old rigid
@@ -74,7 +70,7 @@ PluginComponent {
 
     // Keep these in lockstep with engine/src/config.rs. Persisted output paths
     // are restored before the engine is invoked, so the QML key must invalidate
-    // whenever a depth, mask, or spatial pipeline changes.
+    // whenever a depth or mask pipeline changes.
     readonly property int depthPipelineVersion: 2
     readonly property int maskPipelineVersion: 1
 
@@ -127,17 +123,12 @@ PluginComponent {
     }
 
     function parallaxEnabledFor(screenName) {
-        return root._boolSettingFor(screenName, "parallaxEnabled", false)
-            && !root._boolSettingFor(screenName, "spatialEnabled", false);
+        return root._boolSettingFor(screenName, "parallaxEnabled", false);
     }
 
-    function spatialEnabledFor(screenName) {
-        return root._boolSettingFor(screenName, "spatialEnabled", false);
-    }
-
-    function spatialTravelPercentFor(screenName) {
-        return Math.max(0, Math.min(10,
-            root._intSettingFor(screenName, "spatialTravel", root.spatialTravelPercent)));
+    function displayLayerFor(screenName) {
+        const raw = String(root._settingFor(screenName, "displayLayer", root.displayLayer) ?? "bottom").toLowerCase();
+        return raw === "background" ? "background" : "bottom";
     }
 
     function parallaxMaxTravelPercentFor(screenName) {
@@ -162,11 +153,7 @@ PluginComponent {
     function parametersKeyFor(screenName) {
         const t = (thresholdFor(screenName) / 100).toFixed(4);
         const f = (featherFor(screenName) / 100).toFixed(4);
-        const sp = spatialEnabledFor(screenName);
-        const fgSuffix = (sp && root.spatialModel !== "isnet-anime") ? (":" + root.spatialModel) : "";
-        return "d" + depthPipelineVersion + "m" + maskPipelineVersion
-            + "s" + spatialPipelineVersion + ":" + modelType + ":" + t + ":" + f
-            + ":spatial=" + (sp ? "1" : "0") + fgSuffix;
+        return "d" + depthPipelineVersion + "m" + maskPipelineVersion + ":" + modelType + ":" + t + ":" + f;
     }
 
     // Changing either parameter or the model invalidates the mask, so this key
@@ -186,140 +173,6 @@ PluginComponent {
         return decodeURIComponent(url.replace(/^file:\/\//, "").replace(/\/$/, ""));
     }
 
-    // ---- native 3D renderer ------------------------------------------------
-    // The Quick3D mesh is a native QML plugin: it has to be built against the
-    // host's Qt (a prebuilt .so would not match the user's Qt ABI), so the
-    // source ships with the plugin and is compiled here once. Until it exists
-    // the spatial mode falls back to the shader path, which only translates a
-    // flat image -- the settings page says so instead of degrading silently.
-    readonly property string spatial3dSoPath: root.pluginDir
-        + "/qml/native/Depthscape/Spatial3D/libdepthscape_spatial3d.so"
-    // Lives beside the build output, not in plugin data: a re-cloned install
-    // loses both, and a stale flag in the settings store would then forbid the
-    // one automatic attempt that a fresh copy needs.
-    readonly property string spatial3dAttemptMarker: root.pluginDir
-        + "/qml/native/.spatial3d-build-attempted"
-    readonly property string spatial3dFallbackProblem:
-        I18n.trFor("depthscape", "Native 3D renderer not built; spatial mode uses the flat shader fallback.")
-    property bool spatial3dReady: false
-    property bool spatial3dBuilding: false
-    property string spatial3dProblem: ""
-    property string spatial3dStderr: ""
-
-    function refreshSpatial3dState() {
-        if (spatial3dCheck.running || root.spatial3dBuilding)
-            return;
-        spatial3dCheck.running = true;
-    }
-
-    function buildSpatial3d() {
-        if (root.spatial3dBuilding)
-            return;
-        root.spatial3dBuilding = true;
-        root.spatial3dProblem = "";
-        root.spatial3dStderr = "";
-        spatial3dBuild.running = true;
-    }
-
-    function spatial3dBuildFailure(exitCode) {
-        const detail = (root.spatial3dStderr !== "" ? root.spatial3dStderr
-            : (spatial3dBuild.stderr ? spatial3dBuild.stderr.text : "")) || "";
-        if (detail.indexOf("cmake is not installed") >= 0)
-            return I18n.trFor("depthscape", "CMake is missing. Install cmake and a C++ toolchain, then build again.");
-        if (detail.indexOf("No C++ compiler found") >= 0)
-            return I18n.trFor("depthscape", "No C++ compiler found. Install a C++ toolchain, then build again.");
-        if (detail.indexOf("Qt Quick3D development files") >= 0)
-            return I18n.trFor("depthscape", "Qt Quick3D development files are missing. Install the Qt 6 Quick3D development package, then build again.");
-        const lines = detail.split("\n").map(line => line.trim()).filter(line => line !== "");
-        if (lines.length > 0)
-            return I18n.trFor("depthscape", "Build failed (exit %1): %2").arg(exitCode).arg(lines[lines.length - 1]);
-        return I18n.trFor("depthscape", "Build failed (exit %1)").arg(exitCode);
-    }
-
-    /// Compile once per installed copy when possible. The marker keeps a
-    /// machine without Qt6 Quick3D development files from retrying on every
-    /// shell start; the settings button retries explicitly.
-    function ensureSpatial3d() {
-        if (root.spatial3dReady || root.spatial3dBuilding)
-            return;
-        // Never race the model download for CPU, and never have the post-model
-        // reload destroy this daemon in the middle of a build.
-        if (root.modelBusy || root.defaultModelQueue.length > 0) {
-            spatial3dDefer.restart();
-            return;
-        }
-        spatial3dMarkAttempt.running = true;
-        root.buildSpatial3d();
-    }
-
-    Timer {
-        id: spatial3dDefer
-        interval: 20 * 1000
-        repeat: false
-        onTriggered: root.ensureSpatial3d()
-    }
-
-    Process {
-        id: spatial3dMarkAttempt
-
-        command: ["sh", "-c", 'mkdir -p "$(dirname "$1")" && : > "$1"', "sh", root.spatial3dAttemptMarker]
-    }
-
-    Process {
-        id: spatial3dCheck
-
-        command: [
-            "sh", "-c",
-            'if [ -f "$1" ]; then echo ready; ' +
-            'elif [ -f "$2" ]; then echo attempted; ' +
-            'else echo missing; fi',
-            "sh", root.spatial3dSoPath, root.spatial3dAttemptMarker
-        ]
-        stdout: StdioCollector {
-            onStreamFinished: {
-                const state = text.trim();
-                root.spatial3dReady = state === "ready";
-                if (root.spatial3dReady) {
-                    root.spatial3dProblem = "";
-                    return;
-                }
-                if (root.spatial3dProblem === "")
-                    root.spatial3dProblem = root.spatial3dFallbackProblem;
-                if (state === "missing")
-                    root.ensureSpatial3d();
-            }
-        }
-    }
-
-    Process {
-        id: spatial3dBuild
-
-        command: ["bash", root.pluginDir + "/tools/build-spatial3d.sh"]
-        onExited: exitCode => {
-            root.spatial3dBuilding = false;
-            if (exitCode === 0) {
-                root.spatial3dReady = true;
-                root.spatial3dProblem = "";
-                // The surfaces only import the module once this flips, so the
-                // first import attempt happens with the library already there.
-                if (typeof ToastService !== "undefined" && ToastService.showInfo) {
-                    ToastService.showInfo(I18n.trFor("depthscape", "Depthscape"),
-                        I18n.trFor("depthscape", "3D renderer built. Spatial mode switches to the native mesh."),
-                        "", "depthscape-spatial3d-ready");
-                }
-                return;
-            }
-            root.spatial3dProblem = root.spatial3dBuildFailure(exitCode);
-            if (typeof ToastService !== "undefined" && ToastService.showWarning) {
-                ToastService.showWarning(I18n.trFor("depthscape", "Depthscape: 3D renderer not built"),
-                    root.spatial3dProblem, "", "depthscape-spatial3d-fail");
-            }
-        }
-        stderr: StdioCollector {
-            onStreamFinished: root.spatial3dStderr = text
-        }
-    }
-
     property string enginePath: ""
     property string engineProblem: ""
     property bool downloadingEngine: false
@@ -329,7 +182,6 @@ PluginComponent {
     property string installingModel: ""
     property string removingModel: ""
     property var availableModels: []
-    property var foregroundModels: []
     property var currentModelInfo: null
 
     /// Models this build always uses. They are provisioned automatically so a
@@ -337,7 +189,7 @@ PluginComponent {
     /// is actually on disk rather than a persisted flag -- a re-cloned plugin
     /// directory loses its models, and a stored flag would leave it stuck
     /// believing they are still there.
-    readonly property var defaultModelIds: ["small", "spatial-isnet-anime"]
+    readonly property var defaultModelIds: ["small"]
     property var defaultModelQueue: []
     property bool defaultModelFailed: false
     property int defaultModelAttempts: 0
@@ -415,7 +267,7 @@ PluginComponent {
             // The reload would destroy this daemon and with it the build or an
             // in-flight analysis, and the surfaces would come back pointing at
             // files that are still being written.
-            if (root.spatial3dBuilding || root.active !== null || root.queue.length > 0) {
+            if (root.active !== null || root.queue.length > 0) {
                 provisioningReload.restart();
                 return;
             }
@@ -434,11 +286,9 @@ PluginComponent {
     /// putting the walk here keeps the view layer out of domain iteration and
     /// gives us one place to change the shape of `availableModels` later.
     function isModelReady(modelId) {
-        for (const list of [availableModels, foregroundModels]) {
-            for (let i = 0; i < list.length; i++)
-                if (list[i].id === modelId)
-                    return list[i].ready === true;
-        }
+        for (let i = 0; i < availableModels.length; i++)
+            if (availableModels[i].id === modelId)
+                return availableModels[i].ready === true;
         return false;
     }
 
@@ -446,9 +296,6 @@ PluginComponent {
         for (let i = 0; i < availableModels.length; i++)
             if (availableModels[i].id === modelId)
                 return availableModels[i];
-        for (let i = 0; i < foregroundModels.length; i++)
-            if (foregroundModels[i].id === modelId)
-                return foregroundModels[i];
         return null;
     }
 
@@ -479,7 +326,7 @@ PluginComponent {
     /// own sizing (Modules/WallpaperBackground.qml): logical size × the
     /// compositor's real scale, clamped to the max texture side. The engine
     /// reduces the wallpaper to this before any tier runs, so masks, palettes
-    /// and the spatial layers match what the display can actually show instead
+    /// and the generated mask matches what the display can actually show instead
     /// of the file's native resolution.
     readonly property int maxTextureSide: 8192
 
@@ -500,7 +347,7 @@ PluginComponent {
     }
 
     /// Wallpapers that some screen is actually using right now. The engine keeps
-    /// cached depth/mask/palette/spatial artefacts only for these, so switching
+    /// cached depth/mask/palette artefacts only for these, so switching
     /// wallpaper deletes the previous one's derived data instead of accumulating
     /// it. Screens with both effects off contribute nothing.
     function displayedWallpapers() {
@@ -509,7 +356,7 @@ PluginComponent {
             const name = screen.name;
             if (root.usesNativeWallpaper(name))
                 continue;
-            if (!root.effectEnabledFor(name) && !root.spatialEnabledFor(name))
+            if (!root.effectEnabledFor(name))
                 continue;
             const path = root.wallpaperFor(name);
             if (path === "" || out.indexOf(path) >= 0)
@@ -605,53 +452,6 @@ PluginComponent {
         return row && row.state === "ready" ? (row.palettePath || "") : "";
     }
 
-    function spatialBackgroundFor(screenName) {
-        if (!spatialEnabledFor(screenName))
-            return "";
-        const row = outputs[screenName];
-        return row && row.state === "ready" ? (row.spatialBackgroundPath || "") : "";
-    }
-
-    function spatialForegroundFor(screenName) {
-        if (!spatialEnabledFor(screenName))
-            return "";
-        const row = outputs[screenName];
-        return row && row.state === "ready" ? (row.spatialForegroundPath || "") : "";
-    }
-
-    function spatialDepthFor(screenName) {
-        if (!spatialEnabledFor(screenName))
-            return "";
-        const row = outputs[screenName];
-        return row && row.state === "ready" ? (row.spatialDepthPath || "") : "";
-    }
-
-    function spatialMatteFor(screenName) {
-        if (!spatialEnabledFor(screenName))
-            return "";
-        const row = outputs[screenName];
-        return row && row.state === "ready" ? (row.spatialMattePath || "") : "";
-    }
-
-    /// The engine writes the downscaled photo beside the spatial matte; the 3D
-    /// scene samples it as its colour texture. Derived here once instead of in
-    /// each window, and `verify-all` asserts the engine still names it that way.
-    function spatialPhotoFor(screenName) {
-        return root.spatialMatteFor(screenName).replace(/-matte\.png$/, "-photo.png");
-    }
-
-    function spatialInfluenceFor(screenName) {
-        if (!spatialEnabledFor(screenName))
-            return "";
-        const row = outputs[screenName];
-        return row && row.state === "ready" ? (row.spatialInfluencePath || "") : "";
-    }
-
-    function spatialPathsPresent(row) {
-        return !!row && !!row.spatialBackgroundPath && !!row.spatialForegroundPath
-            && !!row.spatialDepthPath && !!row.spatialMattePath && !!row.spatialInfluencePath;
-    }
-
     function patchRow(screenName, patch) {
         const next = {};
         for (const key in outputs)
@@ -701,7 +501,6 @@ PluginComponent {
                 "installingModel": installingModel,
                 "modelType": modelType,
                 "availableModels": availableModels,
-                "foregroundModels": foregroundModels,
                 "dataRoot": dataRoot,
                 "currentModel": currentModelInfo,
                 "enabled": rows.some(entry => entry.effectEnabled),
@@ -719,7 +518,7 @@ PluginComponent {
     function enqueue(screenName) {
         const row = outputs[screenName];
         if (usesNativeWallpaper(screenName) || !row || !row.wallpaper || !modelReady || enginePath === ""
-                || (!effectEnabledFor(screenName) && !spatialEnabledFor(screenName)))
+                || !effectEnabledFor(screenName))
             return;
         const pKey = parametersKeyFor(screenName);
         const key = screenName + "\n" + row.wallpaper + "\n" + pKey;
@@ -746,7 +545,7 @@ PluginComponent {
     }
 
     function pump() {
-        // A model download owns the CPU and the spatial model may still be
+        // A model download owns the CPU and the model may still be
         // missing, so analysing now would only burn a failed inference.
         if (active !== null || !modelReady || modelBusy || enginePath === "")
             return;
@@ -786,8 +585,6 @@ PluginComponent {
             "--feather", "" + f,
             "--model", root.modelType
         ];
-        if (spatialEnabledFor(job.screenName))
-            command.push("--spatial", "--spatial-model", root.spatialModel);
         for (const path of root.displayedWallpapers())
             command.push("--keep", path);
         const maxDimension = root.maxDeviceDimension();
@@ -826,11 +623,6 @@ PluginComponent {
             patchRow(job.screenName, {
                 "state": "error",
                 "maskPath": "",
-                "spatialBackgroundPath": "",
-                "spatialForegroundPath": "",
-                "spatialDepthPath": "",
-                "spatialMattePath": "",
-                "spatialInfluencePath": "",
                 "message": shortError()
             });
             pump();
@@ -843,25 +635,12 @@ PluginComponent {
         } catch (error) {
             parsed = null;
         }
-        const valid = parsed
-            && typeof parsed.maskPath === "string" && parsed.maskPath !== ""
-            && (!spatialEnabledFor(job.screenName)
-                || (typeof parsed.spatialError === "string" && parsed.spatialError !== "")
-                || (typeof parsed.spatialBackgroundPath === "string" && parsed.spatialBackgroundPath !== ""
-                    && typeof parsed.spatialForegroundPath === "string" && parsed.spatialForegroundPath !== ""
-                    && typeof parsed.spatialDepthPath === "string" && parsed.spatialDepthPath !== ""
-                    && typeof parsed.spatialMattePath === "string" && parsed.spatialMattePath !== ""
-                    && typeof parsed.spatialInfluencePath === "string" && parsed.spatialInfluencePath !== ""));
+        const valid = parsed && typeof parsed.maskPath === "string" && parsed.maskPath !== "";
         if (!valid) {
             patchRow(job.screenName, {
                 "state": "error",
                 "maskPath": "",
                 "palettePath": "",
-                "spatialBackgroundPath": "",
-                "spatialForegroundPath": "",
-                "spatialDepthPath": "",
-                "spatialMattePath": "",
-                "spatialInfluencePath": "",
                 "message": I18n.trFor("depthscape", "The depth engine returned an unexpected result.")
             });
         } else {
@@ -877,40 +656,13 @@ PluginComponent {
                 // case. Widgets in auto mode fall back to their manual
                 // colours; every other mode ignores the field entirely.
                 "palettePath": typeof parsed.palettePath === "string" ? parsed.palettePath : "",
-                "spatialBackgroundPath": typeof parsed.spatialBackgroundPath === "string" ? parsed.spatialBackgroundPath : "",
-                "spatialForegroundPath": typeof parsed.spatialForegroundPath === "string" ? parsed.spatialForegroundPath : "",
-                "spatialDepthPath": typeof parsed.spatialDepthPath === "string" ? parsed.spatialDepthPath : "",
-                "spatialMattePath": typeof parsed.spatialMattePath === "string" ? parsed.spatialMattePath : "",
-                "spatialInfluencePath": typeof parsed.spatialInfluencePath === "string" ? parsed.spatialInfluencePath : "",
-                "message": parsed.spatialError || parsed.spatialWarning || "",
+                "message": "",
                 "elapsedMs": parsed.elapsedMs || 0,
                 "cacheHit": parsed.splitCacheHit === true
             });
-            if (parsed.spatialError)
-                console.warn("Depthscape: spatial wallpaper unavailable: " + parsed.spatialError);
-            if (parsed.spatialError || (typeof parsed.spatialWarning === "string"
-                    && parsed.spatialWarning.startsWith("IS-Net Anime")
-                    && parsed.spatialWarning.indexOf("unavailable") !== -1)) {
-                // Re-run after the engine's temporary model fallback has had
-                // time to recover. The engine cache also throttles retries,
-                // so a shell restart cannot turn this into a download loop.
-                spatialRetryTimer.restart();
-            }
-            const retryableSpatialFallback = typeof parsed.spatialWarning === "string"
-                && parsed.spatialWarning.startsWith("IS-Net Anime")
-                && parsed.spatialWarning.indexOf("unavailable") !== -1;
-            if (!parsed.spatialError && !retryableSpatialFallback)
-                root.persistLastOutput(job.screenName, job.wallpaper, job.parametersKey, parsed.maskPath,
-                    typeof parsed.palettePath === "string" ? parsed.palettePath : "",
-                    typeof parsed.spatialBackgroundPath === "string" ? parsed.spatialBackgroundPath : "",
-                    typeof parsed.spatialForegroundPath === "string" ? parsed.spatialForegroundPath : "",
-                    typeof parsed.spatialDepthPath === "string" ? parsed.spatialDepthPath : "",
-                    typeof parsed.spatialMattePath === "string" ? parsed.spatialMattePath : "",
-                    typeof parsed.spatialInfluencePath === "string" ? parsed.spatialInfluencePath : "",
-                    typeof parsed.spatialWarning === "string" ? parsed.spatialWarning : "",
-                    Array.isArray(parsed.bbox) ? parsed.bbox : null,
-                    parsed.width || 0,
-                    parsed.height || 0);
+            root.persistLastOutput(job.screenName, job.wallpaper, job.parametersKey, parsed.maskPath,
+                typeof parsed.palettePath === "string" ? parsed.palettePath : "",
+                Array.isArray(parsed.bbox) ? parsed.bbox : null, parsed.width || 0, parsed.height || 0);
             root.evaluateReveal();
         }
         pump();
@@ -956,14 +708,7 @@ PluginComponent {
             const cached = lookupCachedEntry(map, name, currentWp, pKey);
             if (!cached)
                 continue;
-            const spatial = spatialEnabledFor(name);
-            if (spatial && !spatialPathsPresent(cached))
-                continue;
             const required = [cached.maskPath];
-            if (spatial) {
-                required.push(cached.spatialBackgroundPath, cached.spatialForegroundPath,
-                    cached.spatialDepthPath, cached.spatialMattePath, cached.spatialInfluencePath);
-            }
             candidates[name] = { "cached": cached, "required": required };
             for (const path of required)
                 paths.push(path);
@@ -1006,12 +751,7 @@ PluginComponent {
                 // an absent path is a valid "no sidecar yet" state that
                 // auto mode falls out of gracefully.
                 "palettePath": cached.palettePath || "",
-                "spatialBackgroundPath": cached.spatialBackgroundPath || "",
-                "spatialForegroundPath": cached.spatialForegroundPath || "",
-                "spatialDepthPath": cached.spatialDepthPath || "",
-                "spatialMattePath": cached.spatialMattePath || "",
-                "spatialInfluencePath": cached.spatialInfluencePath || "",
-                "message": cached.spatialWarning || "",
+                "message": "",
                 "elapsedMs": 0,
                 "cacheHit": true
             };
@@ -1021,9 +761,7 @@ PluginComponent {
             outputs = merged;
     }
 
-    function persistLastOutput(screenName, wallpaper, paramsKey, maskPath, palettePath,
-            spatialBackgroundPath, spatialForegroundPath, spatialDepthPath, spatialMattePath,
-            spatialInfluencePath, spatialWarning, bbox, width, height) {
+    function persistLastOutput(screenName, wallpaper, paramsKey, maskPath, palettePath, bbox, width, height) {
         if (!pluginService || !pluginService.savePluginData)
             return;
         let map = {};
@@ -1045,13 +783,7 @@ PluginComponent {
             "bbox": bbox || null,
             "width": width || 0,
             "height": height || 0,
-            "palettePath": palettePath || "",
-            "spatialBackgroundPath": spatialBackgroundPath || "",
-            "spatialForegroundPath": spatialForegroundPath || "",
-            "spatialDepthPath": spatialDepthPath || "",
-            "spatialMattePath": spatialMattePath || "",
-            "spatialInfluencePath": spatialInfluencePath || "",
-            "spatialWarning": spatialWarning || ""
+            "palettePath": palettePath || ""
         };
         // Only the wallpapers on screen are remembered. The engine deletes the
         // derived files for everything else, so keeping a 60-entry history here
@@ -1096,11 +828,6 @@ PluginComponent {
                 row.width = 0;
                 row.height = 0;
                 row.palettePath = "";
-                row.spatialBackgroundPath = "";
-                row.spatialForegroundPath = "";
-                row.spatialDepthPath = "";
-                row.spatialMattePath = "";
-                row.spatialInfluencePath = "";
                 row.message = "";
                 row.elapsedMs = 0;
                 row.cacheHit = false;
@@ -1120,16 +847,6 @@ PluginComponent {
         id: paramDebounceTimer
 
         interval: 150
-        repeat: false
-        onTriggered: {
-            if (root.autoGenerate)
-                root.enqueueAll();
-        }
-    }
-
-    Timer {
-        id: spatialRetryTimer
-        interval: 15 * 60 * 1000
         repeat: false
         onTriggered: {
             if (root.autoGenerate)
@@ -1289,7 +1006,6 @@ PluginComponent {
                 }
                 root.modelReady = parsed !== null && parsed.ready === true;
                 root.availableModels = parsed && parsed.availableModels ? parsed.availableModels : [];
-                root.foregroundModels = parsed && parsed.foregroundModels ? parsed.foregroundModels : [];
                 root.ensureDefaultModels();
                 if (root.defaultModelProvisioning && root.defaultModelsPresent())
                     provisioningReload.restart();
@@ -1392,7 +1108,7 @@ PluginComponent {
                 return;
             }
             for (const name in outputs)
-                patchRow(name, { "state": "pending", "maskPath": "", "palettePath": "", "spatialBackgroundPath": "", "spatialForegroundPath": "", "spatialDepthPath": "", "spatialMattePath": "", "spatialInfluencePath": "", "message": "" });
+                patchRow(name, { "state": "pending", "maskPath": "", "palettePath": "", "message": "" });
             root.modelReady = false;
             root.queue = [];
             if (typeof ToastService !== "undefined" && ToastService.showInfo)
@@ -1504,7 +1220,7 @@ PluginComponent {
         if (enginePath === "")
             return;
         for (const name in outputs)
-            patchRow(name, { "state": "pending", "maskPath": "", "spatialBackgroundPath": "", "spatialForegroundPath": "", "spatialDepthPath": "", "spatialMattePath": "", "spatialInfluencePath": "", "message": "" });
+            patchRow(name, { "state": "pending", "maskPath": "", "message": "" });
         queue = [];
         cacheProcess.command = root.engineArgs(["clear-cache"]);
         cacheProcess.running = true;
@@ -1696,25 +1412,72 @@ PluginComponent {
 
     // Re-stack only DepthForeground (without destroying surfaces or unloading
     // GPU textures) when desktop widgets finish editing or rebuild their layer order.
-    property bool foregroundRestacking: false
+    property bool backgroundRestacking: false
+    property bool bottomRestacking: false
+    readonly property bool foregroundRestacking: root.backgroundRestacking || root.bottomRestacking
     property bool _bouncingWidgets: false
+
+    function hasBackgroundLayerForeground() {
+        for (const group of root.surfaceGroups) {
+            if (group && group.screenDisplayLayer === "background"
+                    && group.screenEffectEnabled)
+                return true;
+        }
+        return false;
+    }
+
+    function hasBottomLayerForeground() {
+        for (const group of root.surfaceGroups) {
+            if (group && group.screenDisplayLayer === "bottom"
+                    && group.screenEffectEnabled)
+                return true;
+        }
+        return false;
+    }
 
     function restackForeground() {
         if (!root.surfacesMapped)
             return;
-        // Only a background-layer widget can end up above us; without one the
-        // remap would be a visible blink for nothing.
-        if (!root.hasBackgroundDesktopWidgets())
+        // On the background layer only a background-layer widget can end up
+        // above us; without one the remap would be a visible blink for nothing.
+        if (root.hasBackgroundDesktopWidgets() && root.hasBackgroundLayerForeground()) {
+            root.backgroundRestacking = true;
+            backgroundRestackTimer.restart();
+        }
+        // On the bottom layer, always unmap and re-map the foreground last so
+        // it sits above every bottom-layer widget and surface.
+        if (root.hasBottomLayerForeground()) {
+            root.bottomRestacking = true;
+            bottomRestackTimer.restart();
+        }
+    }
+
+    function restackBottomForeground() {
+        if (!root.surfacesMapped || !root.hasBottomLayerForeground())
             return;
-        root.foregroundRestacking = true;
-        foregroundRestackTimer.restart();
+        root.bottomRestacking = true;
+        bottomRestackTimer.restart();
     }
 
     Timer {
-        id: foregroundRestackTimer
+        id: backgroundRestackTimer
         interval: 32
         repeat: false
-        onTriggered: root.foregroundRestacking = false
+        onTriggered: root.backgroundRestacking = false
+    }
+
+    Timer {
+        id: bottomRestackTimer
+        interval: 32
+        repeat: false
+        onTriggered: root.bottomRestacking = false
+    }
+
+    Timer {
+        id: bottomStartupRestackTimer
+        interval: 2500
+        repeat: false
+        onTriggered: root.restackBottomForeground()
     }
 
     function hasBackgroundDesktopWidgets() {
@@ -1838,7 +1601,7 @@ PluginComponent {
     }
 
     function allParametersSignature() {
-        let sig = root.modelType + ":" + root.spatialModel;
+        let sig = root.modelType;
         const screens = Quickshell.screens ?? [];
         for (let i = 0; i < screens.length; i++)
             sig += "|" + screens[i].name + ":" + parametersKeyFor(screens[i].name);
@@ -1978,7 +1741,14 @@ PluginComponent {
             root.revealedOnce = true;
     }
 
-    onSurfacesMappedChanged: if (surfacesMapped) root.evaluateReveal();
+    onSurfacesMappedChanged: {
+        if (surfacesMapped) {
+            root.evaluateReveal();
+            bottomStartupRestackTimer.restart();
+        } else {
+            bottomStartupRestackTimer.stop();
+        }
+    }
 
     // Poll while the curtain is still down. The mask-ready and backdrop-ready
     // events both also call evaluateReveal directly, so this only needs to
@@ -2042,53 +1812,42 @@ PluginComponent {
                     readonly property string screenName: surfaces.modelData.name
                     readonly property bool screenEffectEnabled: root.effectEnabledFor(screenName)
                     readonly property bool screenParallax: root.parallaxEnabledFor(screenName)
-                    readonly property bool screenSpatial: root.spatialEnabledFor(screenName)
+                    readonly property string screenDisplayLayer: root.displayLayerFor(screenName)
+                    property bool localLayerRestacking: false
+                    readonly property bool groupRestacking: localLayerRestacking
+                        || (screenDisplayLayer === "bottom"
+                            ? root.bottomRestacking
+                            : (root.backgroundRestacking && screenEffectEnabled))
+
+                    Timer {
+                        id: localLayerSettleTimer
+                        interval: 32
+                        repeat: false
+                        onTriggered: {
+                            if (!surfaces.showForeground)
+                                return;
+                            surfaces.localLayerRestacking = true;
+                            localLayerRemapTimer.restart();
+                        }
+                    }
+
+                    Timer {
+                        id: localLayerRemapTimer
+                        interval: 32
+                        repeat: false
+                        onTriggered: surfaces.localLayerRestacking = false
+                    }
+
+                    onScreenDisplayLayerChanged: {
+                        if (surfaces.showForeground && surfaces.screenEffectEnabled)
+                            localLayerSettleTimer.restart();
+                    }
                     readonly property int screenMaxTravelPercent: root.parallaxMaxTravelPercentFor(screenName)
                     readonly property int screenStepPercent: root.parallaxStepPercentFor(screenName)
                     readonly property int screenStepHPercent: root.parallaxStepHorizontalPercentFor(screenName)
                     readonly property bool screenInverted: root.parallaxInvertedFor(screenName)
                     readonly property real screenMaxTravel: screenMaxTravelPercent / 100
-                    readonly property real screenSpatialTravel: screenSpatial
-                        ? root.spatialTravelPercentFor(screenName) / 100 : 0
                     readonly property real screenCanvasTravel: screenParallax ? screenMaxTravel : 0
-                    readonly property bool screenSpatialAssetsExist: screenSpatial
-                        && root.spatialBackgroundFor(screenName) !== ""
-                        && root.spatialForegroundFor(screenName) !== ""
-                        && root.spatialDepthFor(screenName) !== ""
-                        && root.spatialMatteFor(screenName) !== ""
-                        && root.spatialInfluenceFor(screenName) !== ""
-                    readonly property bool bothSpatialScenesReady: screenSpatialAssetsExist
-                        && wallpaperSurface.spatialSceneReady
-                        && foregroundSurface.spatialSceneReady
-                    property bool spatialDisplayActive: false
-
-                    Timer {
-                        id: spatialWarmupTimer
-                        interval: 48
-                        repeat: false
-                        onTriggered: {
-                            if (surfaces.bothSpatialScenesReady && !root.restackPending)
-                                surfaces.spatialDisplayActive = true;
-                        }
-                    }
-
-                    Connections {
-                        target: root
-                        function onRestackPendingChanged() {
-                            if (!root.restackPending && surfaces.bothSpatialScenesReady && !surfaces.spatialDisplayActive)
-                                spatialWarmupTimer.restart();
-                        }
-                    }
-
-                    onBothSpatialScenesReadyChanged: {
-                        if (!bothSpatialScenesReady) {
-                            spatialWarmupTimer.stop();
-                            spatialDisplayActive = false;
-                        } else if (!root.restackPending) {
-                            spatialWarmupTimer.restart();
-                        }
-                    }
-
                     onScreenEffectEnabledChanged: {
                         if (!surfaces.showWallpaper)
                             return;
@@ -2181,9 +1940,9 @@ PluginComponent {
                     // Advanced by `stageTimer`, one step at a time.
                     property int stage: 0
 
-                    readonly property bool wantWallpaper: (root.drawWallpaper || screenSpatial || screenParallax)
+                    readonly property bool wantWallpaper: (root.drawWallpaper || screenParallax)
                         && root.wallpaperFor(modelData.name) !== ""
-                    readonly property bool wantForeground: (screenEffectEnabled || screenSpatial)
+                    readonly property bool wantForeground: screenEffectEnabled
                         && root.wallpaperFor(modelData.name) !== ""
                     readonly property int wanted: (wantWallpaper ? 1 : 0) + (wantForeground ? 1 : 0)
 
@@ -2198,10 +1957,9 @@ PluginComponent {
                     readonly property alias trackerRef: tracker
                     readonly property alias wallpaperRef: wallpaperSurface
                     readonly property alias foregroundRef: foregroundSurface
-                    readonly property alias spatialInputRef: spatialInput
                     Component.onCompleted: {
                         root.surfaceGroups.push(surfaces);
-                        if (!surfaces.screenEffectEnabled && !surfaces.screenSpatial)
+                        if (!surfaces.screenEffectEnabled)
                             root.markBackdropReady(surfaces.screenName);
                         if (surfaces.stage < surfaces.wanted)
                             stageTimer.restart();
@@ -2210,12 +1968,6 @@ PluginComponent {
                         const at = root.surfaceGroups.indexOf(surfaces);
                         if (at >= 0)
                             root.surfaceGroups.splice(at, 1);
-                    }
-
-                    DepthSpatialInput {
-                        id: spatialInput
-                        targetScreen: surfaces.modelData
-                        trackingEnabled: surfaces.screenSpatial && surfaces.showWallpaper && !NiriService.inOverview
                     }
 
                     // 1. Bottom: The wallpaper, on the sliding canvas in the shared backdrop.
@@ -2232,30 +1984,18 @@ PluginComponent {
                         onBackdropReady: root.markBackdropReady(surfaces.modelData.name)
                         parallaxEnabled: surfaces.screenParallax
                         maxTravel: surfaces.screenMaxTravel
-                        spatialEnabled: surfaces.screenSpatial
-                        spatialAssetsReady: surfaces.screenSpatialAssetsExist
-                        spatialDisplayActive: surfaces.spatialDisplayActive
-                        spatialBackgroundPath: root.spatialBackgroundFor(surfaces.screenName)
-                        spatialForegroundPath: root.spatialForegroundFor(surfaces.screenName)
-                        spatialDepthPath: root.spatialDepthFor(surfaces.screenName)
-                        spatialMattePath: root.spatialMatteFor(surfaces.screenName)
-                        spatialInfluencePath: root.spatialInfluenceFor(surfaces.screenName)
-                        spatialPhotoPath: root.spatialPhotoFor(surfaces.screenName)
-                        nativeModuleAvailable: root.spatial3dReady
-                        spatialPointerX: spatialInput.pointerX
-                        spatialPointerY: spatialInput.pointerY
-                        spatialTravel: surfaces.screenSpatialTravel
                         motionDuration: root.parallaxDuration
                         offsetX: surfaces.canvasOffsetX
                         offsetY: surfaces.canvasOffsetY
                     }
 
-                    // 2. Top: The foreground layer (depth-masked subject or 3D mesh).
-                    // Mapped on top of WlrLayer.Background, so native desktop widgets
-                    // set to layer: "background" render underneath it when occlusion is enabled.
+                    // 2. Top: The foreground layer (depth-masked subject).
+                    // The default bottom layer sits above bottom-layer desktop
+                    // widgets; background can be selected for Niri's backdrop.
                     DepthForeground {
                         id: foregroundSurface
                         targetScreen: surfaces.modelData
+                        layer: surfaces.screenDisplayLayer === "bottom" ? WlrLayer.Bottom : WlrLayer.Background
                         wallpaperPath: root.wallpaperFor(surfaces.screenName)
                         maskPath: surfaces.screenEffectEnabled
                             ? root.maskFor(surfaces.screenName)
@@ -2263,24 +2003,11 @@ PluginComponent {
                         bbox: root.bboxFor(surfaces.screenName)
                         imageWidth: root.sourceWidthFor(surfaces.screenName)
                         imageHeight: root.sourceHeightFor(surfaces.screenName)
-                        foregroundPath: root.spatialForegroundFor(surfaces.screenName)
-                        backgroundPath: root.spatialBackgroundFor(surfaces.screenName)
-                        depthPath: root.spatialDepthFor(surfaces.screenName)
-                        mattePath: root.spatialMatteFor(surfaces.screenName)
-                        influencePath: root.spatialInfluenceFor(surfaces.screenName)
-                        spatialPhotoPath: root.spatialPhotoFor(surfaces.screenName)
-                        nativeModuleAvailable: root.spatial3dReady
-                        spatialEnabled: surfaces.screenSpatial
-                        spatialAssetsReady: surfaces.screenSpatialAssetsExist
-                        spatialDisplayActive: surfaces.spatialDisplayActive
-                        pointerX: spatialInput.pointerX
-                        pointerY: spatialInput.pointerY
-                        spatialTravel: surfaces.screenSpatialTravel
                         outputAspect: surfaces.modelData.width / Math.max(1, surfaces.modelData.height)
                         effectEnabled: surfaces.screenEffectEnabled
                         visible: surfaces.showForeground
-                            && (!root.foregroundRestacking || !surfaces.screenEffectEnabled)
-                            && (surfaces.screenEffectEnabled || surfaces.screenSpatial)
+                            && !surfaces.groupRestacking
+                            && surfaces.screenEffectEnabled
                             && (foregroundPath !== "" || wallpaperPath !== "")
                         revealed: root.revealedOnce
                         maxTravel: surfaces.screenCanvasTravel
@@ -2324,7 +2051,6 @@ PluginComponent {
         root._lastModelType = root.modelType;
         root._lastParametersSignature = root.allParametersSignature();
         root.checkCompositorLayerRule();
-        root.refreshSpatial3dState();
         // A button pressed while the settings page was waiting for the daemon
         // leaves an `action` in plugin data. Replay it once at startup instead
         // of leaving it stranded until the next unrelated settings change.

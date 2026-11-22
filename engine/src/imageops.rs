@@ -290,7 +290,7 @@ pub fn foreground_alpha(
 /// Shrink `(width, height)` until the long edge fits in `cap`, keeping aspect.
 ///
 /// Applied once to the decoded wallpaper so every tier below — depth input,
-/// refinement, mask, palette and the spatial layers — works from the same
+/// refinement, mask and palette — works from the same
 /// already-reduced image instead of from the file's native resolution.
 pub fn cap_to_dimension(width: u32, height: u32, cap: Option<u32>) -> (u32, u32) {
     let (width, height) = (width.max(1), height.max(1));

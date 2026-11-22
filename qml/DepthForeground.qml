@@ -10,7 +10,6 @@ import qs.Services
 //
 // In standard depth mode, it masks the wallpaper with the depth mask (alpha > 0)
 // so only the near-plane subject is drawn, occluding desktop widgets underneath.
-// In spatial 3D mode, it can render the 3D depth mesh.
 //
 // DUAL-SLOT TRANSITION:
 // Matches DMS's native wallpaper transition (SessionData.wallpaperTransition, 1000ms).
@@ -26,18 +25,8 @@ PanelWindow {
     property var bbox: null
     property real imageWidth: 0
     property real imageHeight: 0
-    property string backgroundPath: ""
-    property string depthPath: ""
-    property string mattePath: ""
-    property string influencePath: ""
-    property real pointerX: 0
-    property real pointerY: 0
-    property real spatialTravel: 0.03
     property real outputAspect: 16 / 9
     property real sourceAspect: 16 / 9
-    property bool spatialEnabled: false
-    property bool spatialAssetsReady: false
-    property bool spatialDisplayActive: false
     property bool effectEnabled: true
     property bool revealed: false
     property real maxTravel: 0
@@ -51,29 +40,23 @@ PanelWindow {
         return "file://" + clean.split("/").map(s => encodeURIComponent(s)).join("/");
     }
 
-    onPointerXChanged: if (root.spatialDisplayActive) foregroundContent.update()
-    onPointerYChanged: if (root.spatialDisplayActive) foregroundContent.update()
 
     signal foregroundReady()
 
     screen: root.targetScreen
-    visible: (root.effectEnabled || root.spatialEnabled)
+    visible: root.effectEnabled
         && (root.foregroundPath !== "" || root.wallpaperPath !== "")
     color: "transparent"
     implicitWidth: root.targetScreen ? root.targetScreen.width : 0
     implicitHeight: root.targetScreen ? root.targetScreen.height : 0
 
 
-    /// The engine writes a downscaled photo alongside the spatial layers; the
-    /// 3D scene samples that instead of the original wallpaper file.
-    /// Downscaled photo for the 3D mesh's colour texture, supplied by the daemon.
-    property string spatialPhotoPath: ""
-    /// False until the daemon has confirmed the native Quick3D module is
-    /// installed; the scene keeps the shader fallback until then.
-    property bool nativeModuleAvailable: false
+    /// Wayland layer-shell layer for this surface (`WlrLayer.Background` or
+    /// `WlrLayer.Bottom`), supplied by DepthDaemon from per-screen settings.
+    property int layer: WlrLayer.Bottom
 
     WlrLayershell.namespace: "depthscape:foreground"
-    WlrLayershell.layer: WlrLayer.Background
+    WlrLayershell.layer: root.layer
     WlrLayershell.exclusiveZone: -1
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
 
@@ -305,10 +288,6 @@ PanelWindow {
     onBboxChanged: scheduleTargets()
 
     function checkReady() {
-        if (root.spatialSceneReady) {
-            root.foregroundReady();
-            return;
-        }
         if (!root.dedicatedCutoutActive) {
             if (currentWpSource.status === Image.Ready && currentMaskSource.status === Image.Ready) {
                 root.foregroundReady();
@@ -316,11 +295,6 @@ PanelWindow {
         } else if (foregroundImg.status === Image.Ready) {
             root.foregroundReady();
         }
-    }
-
-    onSpatialSceneReadyChanged: {
-        if (spatialSceneReady)
-            root.foregroundReady();
     }
 
     Component.onCompleted: {
@@ -358,8 +332,7 @@ PanelWindow {
                 Item {
                     id: maskedStandardForeground
                     anchors.fill: parent
-                    visible: root.effectEnabled && !root.dedicatedCutoutActive && spatialScene.opacity < 0.995
-                    opacity: Math.max(0.0, 1.0 - spatialScene.opacity)
+                    visible: root.effectEnabled && !root.dedicatedCutoutActive
 
                     // --- SLOT 1 (Current / Outgoing) ---
                     Item {
@@ -530,11 +503,11 @@ PanelWindow {
                     }
                 }
 
-                // Dedicated cutout image mode (if an explicit non-spatial foreground asset is provided)
+                // Dedicated cutout image mode (if an explicit foreground asset is provided)
                 Image {
                     id: foregroundImg
                     anchors.fill: parent
-                    visible: root.dedicatedCutoutActive && !root.spatialDisplayActive
+                    visible: root.dedicatedCutoutActive
                     source: root.dedicatedCutoutActive ? root.encodeFileUrl(root.foregroundPath) : ""
                     fillMode: Image.PreserveAspectCrop
                     sourceSize: Qt.size(Math.max(1, Math.round(parent.width)), Math.max(1, Math.round(parent.height)))
@@ -542,7 +515,7 @@ PanelWindow {
                     asynchronous: true
                     retainWhileLoading: true
                     smooth: true
-                    opacity: root.revealed && status === Image.Ready && !root.spatialDisplayActive ? 1 : 0
+                    opacity: root.revealed && status === Image.Ready ? 1 : 0
                     onStatusChanged: {
                         if (status === Image.Ready)
                             root.foregroundReady();
@@ -552,36 +525,11 @@ PanelWindow {
                     }
                 }
 
-                // Spatial 3D scene (Quick3D mesh)
-                DepthSpatialScene {
-                    id: spatialScene
-                    anchors.fill: parent
-                    visible: root.spatialBuildActive || opacity > 0.002
-                    opacity: root.spatialDisplayActive ? 1.0 : (root.spatialBuildActive ? 0.001 : 0.0)
-                    Behavior on opacity {
-                        NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
-                    }
-                    surfaceVisible: root.visible
-                    sceneLayer: "foreground"
-                    sourcePath: root.foregroundPath !== "" ? root.foregroundPath : root.wallpaperPath
-                    originalPath: root.spatialPhotoPath !== "" ? root.spatialPhotoPath : root.wallpaperPath
-                    backgroundPath: root.backgroundPath
-                    depthPath: root.depthPath
-                    mattePath: root.mattePath
-                    influencePath: root.influencePath
-                    pointerX: root.pointerX
-                    pointerY: root.pointerY
-                    spatialTravel: root.spatialTravel
-                    spatialEnabled: root.spatialBuildActive
-                    outputAspect: root.effectiveOutputAspect
-                    sourceAspect: root.effectiveSourceAspect
-                    nativeModuleAvailable: root.nativeModuleAvailable
-                }
             }
         }
     }
 
-    readonly property bool dedicatedCutoutActive: !root.spatialEnabled && root.foregroundPath !== ""
+    readonly property bool dedicatedCutoutActive: root.foregroundPath !== ""
     readonly property real effectiveOutputAspect: root.screenWidth > 0 && root.screenHeight > 0
         ? (root.screenWidth / root.screenHeight)
         : root.outputAspect
@@ -590,14 +538,7 @@ PanelWindow {
         : ((currentWpSource.implicitWidth > 0 && currentWpSource.implicitHeight > 0)
             ? (currentWpSource.implicitWidth / currentWpSource.implicitHeight)
             : root.effectiveOutputAspect)
-    readonly property bool spatialBuildActive: root.spatialEnabled && root.spatialAssetsReady
-        && root.wallpaperPath !== "" && root.backgroundPath !== ""
-        && root.depthPath !== "" && root.mattePath !== "" && root.influencePath !== ""
-    readonly property bool spatialSceneReady: spatialScene.sceneReady
-    readonly property bool spatialNativeReady: spatialScene.nativeReady
-    readonly property int spatialNativeStatus: spatialScene.nativeStatus
     readonly property alias foregroundItem: foregroundContent
-    readonly property alias spatialSceneItem: spatialScene
     readonly property bool overviewBlurActive:
         CompositorService.isNiri
         && (SettingsData.blurWallpaperOnOverview ?? false)

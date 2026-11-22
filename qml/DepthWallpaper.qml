@@ -62,19 +62,8 @@ PanelWindow {
     // PreserveAspectCrop silently reframes the image.
     property bool parallaxEnabled: false
     property real maxTravel: 0.25
-    property bool spatialEnabled: false
-    property bool spatialAssetsReady: false
-    property bool spatialDisplayActive: false
     property real imageWidth: 0
     property real imageHeight: 0
-    property string spatialBackgroundPath: ""
-    property string spatialForegroundPath: ""
-    property string spatialDepthPath: ""
-    property string spatialMattePath: ""
-    property string spatialInfluencePath: ""
-    property real spatialPointerX: 0
-    property real spatialPointerY: 0
-    property real spatialTravel: 0.03
     property int motionDuration: 350
 
     function encodeFileUrl(path) {
@@ -84,8 +73,6 @@ PanelWindow {
         return "file://" + clean.split("/").map(s => encodeURIComponent(s)).join("/");
     }
 
-    onSpatialPointerXChanged: if (root.spatialDisplayActive) canvas.update()
-    onSpatialPointerYChanged: if (root.spatialDisplayActive) canvas.update()
 
     readonly property bool active: wallpaperPath !== ""
 
@@ -107,11 +94,6 @@ PanelWindow {
     implicitHeight: root.targetScreen ? root.targetScreen.height : 0
 
 
-    /// Downscaled photo for the 3D mesh's colour texture, supplied by the daemon.
-    property string spatialPhotoPath: ""
-    /// False until the daemon has confirmed the native Quick3D module is
-    /// installed; the scene keeps the shader fallback until then.
-    property bool nativeModuleAvailable: false
 
     WlrLayershell.namespace: "depthscape:wallpaper"
     WlrLayershell.layer: WlrLayer.Background
@@ -150,18 +132,7 @@ PanelWindow {
             ? targetScreen.devicePixelRatio : 1;
     }
 
-    readonly property bool spatialReady: root.spatialEnabled && root.spatialAssetsReady
-        && root.spatialBackgroundPath !== "" && root.spatialForegroundPath !== ""
-        && root.spatialDepthPath !== "" && root.spatialMattePath !== ""
-        && root.spatialInfluencePath !== ""
-    readonly property bool spatialSceneReady: spatialScene.sceneReady
-    readonly property bool spatialNativeReady: spatialScene.nativeReady
-    readonly property int spatialNativeStatus: spatialScene.nativeStatus
     readonly property alias canvasItem: canvas
-    readonly property alias spatialSceneItem: spatialScene
-    readonly property real spatialCameraPointerX: spatialScene.nativePointerX
-    readonly property real spatialCameraPointerY: spatialScene.nativePointerY
-    readonly property real spatialZoom: spatialScene.imageZoom
     readonly property real effectiveOutputAspect: root.screenWidth / Math.max(1, root.screenHeight)
     readonly property real effectiveSourceAspect: (root.imageWidth > 0 && root.imageHeight > 0)
         ? (root.imageWidth / root.imageHeight)
@@ -173,13 +144,6 @@ PanelWindow {
         ? Math.max(0, root.screenHeight) * (root.canvasTravel + 0.001) : 0
     readonly property real canvasWidth: root.screenWidth + 2 * root.marginX
     readonly property real canvasHeight: root.screenHeight + 2 * root.marginY
-
-    onSpatialReadyChanged: {
-        if (!spatialReady) {
-            spatialLayer.x = 0;
-            spatialLayer.y = 0;
-        }
-    }
 
     property bool initialized: false
 
@@ -247,7 +211,7 @@ PanelWindow {
         }
 
         Item {
-            id: spatialLayer
+            id: wallpaperLayer
 
             x: 0
             y: 0
@@ -286,31 +250,6 @@ PanelWindow {
                 }
             }
 
-            DepthSpatialScene {
-                id: spatialScene
-                anchors.fill: parent
-                visible: root.spatialReady || opacity > 0.002
-                opacity: root.spatialDisplayActive ? 1.0 : (root.spatialReady ? 0.001 : 0.0)
-                Behavior on opacity {
-                    NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
-                }
-                surfaceVisible: root.visible
-                spatialEnabled: root.spatialReady
-                sceneLayer: "background"
-                sourcePath: root.wallpaperPath
-                originalPath: root.spatialPhotoPath !== "" ? root.spatialPhotoPath : root.wallpaperPath
-                backgroundPath: root.spatialBackgroundPath
-                depthPath: root.spatialDepthPath
-                mattePath: root.spatialMattePath
-                influencePath: root.spatialInfluencePath
-                pointerX: root.spatialPointerX
-                pointerY: root.spatialPointerY
-                spatialTravel: root.spatialTravel
-                outputAspect: root.effectiveOutputAspect
-                sourceAspect: root.effectiveSourceAspect
-                nativeModuleAvailable: root.nativeModuleAvailable
-            }
-
         // Overview blur. `anchors.fill: parent` inside the animated canvas
         // means the Loader tracks the parallax offset without a main-thread
         // binding on `backdrop.x`, and it draws last among canvas's children
@@ -320,7 +259,7 @@ PanelWindow {
             active: root.overviewBlurActive
             sourceComponent: MultiEffect {
                 anchors.fill: parent
-                source: root.spatialDisplayActive ? spatialScene : backdrop
+                source: backdrop
                 blurEnabled: true
                 blur: 0.8
                 blurMax: 75

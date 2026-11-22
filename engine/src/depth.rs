@@ -104,35 +104,6 @@ impl DepthModel {
                     Ok(normalise(&data))
                 }
             }
-            ModelKind::BiRefNet => {
-                let tensor = Array4::from_shape_vec(
-                    (1, 3, height as usize, width as usize),
-                    to_normalised_chw(rgb, width, height),
-                )
-                .context("cannot build the input tensor")?;
-
-                let input = TensorRef::from_array_view(&tensor)
-                    .map_err(|error| anyhow::anyhow!("cannot wrap the input tensor: {error}"))?;
-                let outputs = self
-                    .session
-                    .run(ort::inputs![input])
-                    .map_err(|error| anyhow::anyhow!("inference failed: {error}"))?;
-
-                let output = outputs[0].try_extract_array::<f32>().map_err(|error| {
-                    anyhow::anyhow!("model output is not an f32 tensor: {error}")
-                })?;
-                let data: Vec<f32> = output.iter().copied().collect();
-                if data.len() != pixels {
-                    bail!(
-                        "model returned {} values, expected {pixels} for {width}x{height}",
-                        data.len()
-                    );
-                }
-                Ok(sigmoid_mask(&data))
-            }
-            ModelKind::SpatialIsNet => {
-                bail!("IS-Net is a spatial foreground model, not a depth model")
-            }
         }
     }
 }
@@ -154,21 +125,6 @@ fn to_normalised_chw(rgb: &[u8], width: u32, height: u32) -> Vec<f32> {
             *p2 = (rgb[base + 2] as f32 / 255.0 - MEAN[2]) / STD[2];
         });
     planar
-}
-
-/// Apply sigmoid to raw logits from BiRefNet: `1 / (1 + exp(-x))`.
-/// Maps logits to calibrated foreground probabilities in `0.0..=1.0`.
-fn sigmoid_mask(values: &[f32]) -> Vec<f32> {
-    values
-        .par_iter()
-        .map(|&value| {
-            if !value.is_finite() {
-                0.0
-            } else {
-                (1.0 / (1.0 + (-value).exp())).clamp(0.0, 1.0)
-            }
-        })
-        .collect()
 }
 
 /// Min-max scale to `0.0..=1.0`.
@@ -257,39 +213,6 @@ mod tests {
         for (channel, value) in planar.iter().enumerate() {
             let expected = (1.0 - MEAN[channel]) / STD[channel];
             assert!((value - expected).abs() < 1e-5);
-        }
-    }
-
-    #[test]
-    fn sigmoid_mask_maps_logits_correctly() {
-        let res = sigmoid_mask(&[0.0, -100.0, 100.0, f32::NAN]);
-        assert!((res[0] - 0.5).abs() < 1e-6);
-        assert_eq!(res[1], 0.0);
-        assert_eq!(res[2], 1.0);
-        assert_eq!(res[3], 0.0);
-    }
-
-    #[test]
-    fn birefnet_session_inspection() {
-        let home = match std::env::var("HOME") {
-            Ok(val) => val,
-            Err(_) => return,
-        };
-        let path = std::path::PathBuf::from(home)
-            .join(".local/share/depthscape/models/birefnet-lite/model.onnx");
-        if !path.exists() {
-            return;
-        }
-        let session = Session::builder().unwrap().commit_from_file(&path).unwrap();
-        assert_eq!(session.inputs().len(), 1);
-        assert_eq!(session.outputs().len(), 1);
-
-        let dummy_rgb = vec![128u8; 1024 * 1024 * 3];
-        let mut model = DepthModel::load(&path, crate::config::ModelKind::BiRefNet).unwrap();
-        let result = model.infer(&dummy_rgb, 1024, 1024).unwrap();
-        assert_eq!(result.len(), 1024 * 1024);
-        for &v in &result {
-            assert!((0.0..=1.0).contains(&v));
         }
     }
 
