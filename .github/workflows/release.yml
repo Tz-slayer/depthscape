@@ -25,6 +25,23 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Validate engine release pin
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          engine_tag=$(cat engine-version)
+          if ! printf '%s\n' "$engine_tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo '::error::engine-version must contain a release tag such as v0.6.0'
+            exit 1
+          fi
+          if [ "$engine_tag" != "$RELEASE_TAG" ]; then
+            git fetch --no-tags origin "refs/tags/$engine_tag:refs/tags/$engine_tag"
+            if ! git diff --quiet "$engine_tag" HEAD -- engine/; then
+              echo "::error::Engine sources differ from $engine_tag. Set engine-version to the current release tag."
+              exit 1
+            fi
+          fi
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

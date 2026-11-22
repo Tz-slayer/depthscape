@@ -67,6 +67,8 @@ Item {
         function downloadEngine(): string {
             if (!root.daemon)
                 return "daemon not ready";
+            if (root.daemon.customEngine)
+                return "custom engine is active; update it manually";
             root.daemon.downloadPrebuiltEngine();
             return "downloading prebuilt depth engine";
         }

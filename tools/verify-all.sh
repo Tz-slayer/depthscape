@@ -129,6 +129,8 @@ sh -n tools/resolve-data-root.sh
 report "data root script syntax" $?
 sh -n tools/download-engine.sh
 report "download engine script syntax" $?
+bash test/download-engine.test.sh
+report "engine version updates and rollback" $?
 
 # A fresh install keeps models inside the plugin directory so DMS's uninstall
 # removes them. Every engine call must therefore go through engineArgs(), or a

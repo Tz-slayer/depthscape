@@ -17,8 +17,8 @@
   "Building engine... %1": {
     "Building engine... %1": "正在构建引擎... %1"
   },
-  "Could not download prebuilt engine. Open plugin settings to retry or build from source.": {
-    "Could not download prebuilt engine. Open plugin settings to retry or build from source.": "无法下载预编译引擎。请打开插件设置重试或从源码编译。"
+  "Checking engine...": {
+    "Checking engine...": "正在检查引擎…"
   },
   "Depth Wallpaper": {
     "Depth Wallpaper": "景深壁纸"
@@ -83,11 +83,14 @@
   "Engine": {
     "Engine": "引擎"
   },
+  "Engine and depth model are ready.": {
+    "Engine and depth model are ready.": "引擎和深度模型已就绪。"
+  },
   "Engine binary not found. Download prebuilt binary or press Build Engine.": {
     "Engine binary not found. Download prebuilt binary or press Build Engine.": "未找到引擎二进制文件。请下载预编译版本或点击“构建引擎”。"
   },
-  "Failed to auto-download engine. Build or retry in settings.": {
-    "Failed to auto-download engine. Build or retry in settings.": "自动下载引擎失败。请在设置中手动构建或重试。"
+  "Engine update failed: %1. Any existing engine was kept; retry in settings.": {
+    "Engine update failed: %1. Any existing engine was kept; retry in settings.": "引擎更新失败：%1。已有引擎文件已保留，请在设置中重试。"
   },
   "Foreground Layer": {
     "Foreground Layer": "前景图层"
@@ -104,14 +107,23 @@
   "Re-check Engine": {
     "Re-check Engine": "重新检测引擎"
   },
-  "Ready · Depth model is ready.": {
-    "Ready · Depth model is ready.": "就绪 · 深度模型已准备好。"
+  "The custom engine specified by DEPTHSCAPE_ENGINE is missing or not executable. Check its path and try again.": {
+    "The custom engine specified by DEPTHSCAPE_ENGINE is missing or not executable. Check its path and try again.": "DEPTHSCAPE_ENGINE 指定的自定义引擎不存在或不可执行，请检查路径后重试。"
   },
   "The depth engine failed without reporting a reason.": {
     "The depth engine failed without reporting a reason.": "深度引擎执行失败，且未返回具体原因。"
   },
   "The depth engine returned an unexpected result.": {
     "The depth engine returned an unexpected result.": "深度引擎返回了异常结果。"
+  },
+  "The engine version could not be verified. Retry the download in settings.": {
+    "The engine version could not be verified. Retry the download in settings.": "无法验证引擎版本，请在设置中重新下载。"
+  },
+  "Use managed engine": {
+    "Use managed engine": "使用自动管理的引擎"
+  },
+  "Using a custom engine. Its version is not managed by Depthscape; update it yourself when upgrading the plugin.": {
+    "Using a custom engine. Its version is not managed by Depthscape; update it yourself when upgrading the plugin.": "正在使用自定义引擎。Depthscape 不管理其版本；升级插件时请自行更新引擎。"
   },
   "Wallpaper cycling is on, so each new wallpaper is analysed from scratch: the depth effect briefly disappears after every change.": {
     "Wallpaper cycling is on, so each new wallpaper is analysed from scratch: the depth effect briefly disappears after every change.": "已开启壁纸轮播：每张新壁纸都会重新分析，因此每次切换后景深效果会短暂消失。"

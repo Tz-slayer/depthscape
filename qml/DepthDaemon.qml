@@ -175,8 +175,16 @@ PluginComponent {
 
     property string enginePath: ""
     property string engineProblem: ""
+    property string engineUpdateProblem: ""
+    property string engineDownloadStderr: ""
     property bool downloadingEngine: false
     property bool engineAutoDownloadAttempted: false
+    property bool customEngine: false
+    property bool explicitEngine: false
+    property string customEnginePath: ""
+    readonly property string enginePreference: pluginData.engineUseBuilt === true ? "built"
+        : (pluginData.engineUseBuilt === false ? "managed" : "auto")
+    property bool checkingEngine: true
     property bool modelReady: false
     property bool modelBusy: false
     property string installingModel: ""
@@ -886,21 +894,37 @@ PluginComponent {
         running: false
         command: [
             "sh", "-c",
-            'if [ -n "$DEPTHSCAPE_ENGINE" ] && [ -x "$DEPTHSCAPE_ENGINE" ]; then echo "$DEPTHSCAPE_ENGINE"; ' +
-            'elif [ -x "$1/bin/depthscape-engine" ]; then echo "$1/bin/depthscape-engine"; ' +
-            'elif [ -x "$1/engine/target/release/depthscape-engine" ]; then echo "$1/engine/target/release/depthscape-engine"; ' +
-            'elif [ -x "$1/engine/target/debug/depthscape-engine" ]; then echo "$1/engine/target/debug/depthscape-engine"; ' +
-            'else command -v depthscape-engine; fi',
-            "sh", root.pluginDir
+            'if [ -n "$DEPTHSCAPE_ENGINE" ]; then if [ -x "$DEPTHSCAPE_ENGINE" ]; then printf "explicit\\n%s\\n" "$DEPTHSCAPE_ENGINE"; else printf "invalid-custom\\n"; fi; ' +
+            'elif [ "$2" = "built" ] && [ -x "$1/engine/target/release/depthscape-engine" ]; then printf "custom\\n%s\\n" "$1/engine/target/release/depthscape-engine"; ' +
+            'elif [ -x "$1/bin/depthscape-engine" ]; then printf "managed\\n"; ' +
+            'elif [ "$2" = "auto" ] && [ -x "$1/engine/target/release/depthscape-engine" ]; then printf "custom\\n%s\\n" "$1/engine/target/release/depthscape-engine"; ' +
+            'elif [ "$2" = "auto" ] && [ -x "$1/engine/target/debug/depthscape-engine" ]; then printf "custom\\n%s\\n" "$1/engine/target/debug/depthscape-engine"; ' +
+            'elif [ "$2" = "auto" ]; then p=$(command -v depthscape-engine || true); if [ -n "$p" ]; then printf "custom\\n%s\\n" "$p"; else printf "missing\\n"; fi; else printf "missing\\n"; fi',
+            "sh", root.pluginDir, root.enginePreference
         ]
         stdout: StdioCollector {
             onStreamFinished: {
-                const found = text.trim();
-                if (found.length > 0) {
-                    root.enginePath = found;
+                const lines = text.trim().split("\n");
+                const source = lines.shift();
+                if (source !== "managed")
+                    root.checkingEngine = false;
+                root.explicitEngine = source === "explicit" || source === "invalid-custom";
+                if ((source === "custom" || source === "explicit") && lines.length > 0) {
+                    root.customEngine = true;
+                    root.engineUpdateProblem = "";
+                    root.customEnginePath = lines.join("\n");
+                    root.enginePath = root.customEnginePath;
                     root.engineProblem = "";
                     root.checkModel();
+                } else if (source === "invalid-custom") {
+                    root.customEngine = true;
+                    root.engineUpdateProblem = I18n.trFor("depthscape", "The custom engine specified by DEPTHSCAPE_ENGINE is missing or not executable. Check its path and try again.");
+                    root.publish();
+                } else if (source === "managed") {
+                    root.customEngine = false;
+                    managedEngineCheck.running = true;
                 } else if (!root.engineAutoDownloadAttempted) {
+                    root.customEngine = false;
                     root.engineAutoDownloadAttempted = true;
                     root.downloadPrebuiltEngine();
                 } else {
@@ -912,9 +936,32 @@ PluginComponent {
     }
 
     Process {
+        id: managedEngineCheck
+        command: ["sh", root.pluginDir + "/tools/download-engine.sh", root.pluginDir, "--check"]
+        onExited: exitCode => {
+            root.checkingEngine = false;
+            if (exitCode === 0) {
+                root.enginePath = root.pluginDir + "/bin/depthscape-engine";
+                root.engineProblem = "";
+                root.engineUpdateProblem = "";
+                root.checkModel();
+            } else if (!root.engineAutoDownloadAttempted) {
+                root.engineAutoDownloadAttempted = true;
+                root.downloadPrebuiltEngine();
+            } else {
+                root.engineUpdateProblem = I18n.trFor("depthscape", "The engine version could not be verified. Retry the download in settings.");
+                root.publish();
+            }
+        }
+    }
+
+    Process {
         id: downloadEngineProcess
 
         command: ["sh", root.pluginDir + "/tools/download-engine.sh", root.pluginDir]
+        stderr: StdioCollector {
+            onStreamFinished: root.engineDownloadStderr = text.trim()
+        }
         onExited: exitCode => {
             root.downloadingEngine = false;
             if (exitCode === 0) {
@@ -923,11 +970,13 @@ PluginComponent {
                 }
                 root.rescanEngine();
             } else {
-                root.engineProblem = I18n.trFor("depthscape", "Failed to auto-download engine. Build or retry in settings.");
+                const detail = root.engineDownloadStderr.split("\n").filter(line => line.trim() !== "").slice(-1)[0]
+                    || I18n.trFor("depthscape", "Download failed (exit %1)").arg(exitCode);
+                root.engineUpdateProblem = I18n.trFor("depthscape", "Engine update failed: %1. Any existing engine was kept; retry in settings.").arg(detail);
                 if (typeof ToastService !== "undefined" && ToastService.showWarning) {
                     ToastService.showWarning(
                         I18n.trFor("depthscape", "Depthscape: engine setup required"),
-                        I18n.trFor("depthscape", "Could not download prebuilt engine. Open plugin settings to retry or build from source."),
+                        root.engineUpdateProblem,
                         "", "depthscape-engine-missing");
                 }
                 root.publish();
@@ -936,8 +985,9 @@ PluginComponent {
     }
 
     function downloadPrebuiltEngine() {
-        if (downloadingEngine)
+        if (downloadingEngine || checkingEngine)
             return;
+        root.engineDownloadStderr = "";
         downloadingEngine = true;
         if (typeof ToastService !== "undefined" && ToastService.showInfo) {
             ToastService.showInfo(I18n.trFor("depthscape", "Depthscape"), I18n.trFor("depthscape", "Downloading prebuilt depth engine..."), "", "depthscape-engine-downloading");
@@ -1210,10 +1260,38 @@ PluginComponent {
 
     /// Re-run the engine lookup after the user has built/installed it.
     function rescanEngine() {
+        if (checkingEngine || downloadingEngine)
+            return;
+        checkingEngine = true;
         enginePath = "";
         modelReady = false;
         resolveEngine.running = false;
         resolveEngine.running = true;
+    }
+
+    function useBuiltEngine() {
+        root.checkingEngine = false;
+        if (pluginService && pluginService.savePluginData)
+            pluginService.savePluginData(pluginId, "engineUseBuilt", true);
+        root.customEngine = true;
+        root.customEnginePath = root.pluginDir + "/engine/target/release/depthscape-engine";
+        root.enginePath = root.customEnginePath;
+        root.engineProblem = "";
+        root.engineUpdateProblem = "";
+        root.checkModel();
+    }
+
+    function useManagedEngine() {
+        if (checkingEngine || downloadingEngine)
+            return;
+        if (pluginService && pluginService.savePluginData)
+            pluginService.savePluginData(pluginId, "engineUseBuilt", false);
+        root.customEngine = false;
+        root.engineAutoDownloadAttempted = false;
+        root.enginePath = "";
+        root.modelReady = false;
+        root.checkingEngine = true;
+        managedEngineCheck.running = true;
     }
 
     function clearCache() {

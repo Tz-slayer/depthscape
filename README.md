@@ -28,7 +28,7 @@ Depthscape estimates wallpaper depth locally to place desktop background widgets
 
 - **Dux Shell (dux-shell)** 2.0+ (with [PR #4162](https://github.com/duxlabs-dev/dux-shell/pull/4162) desktop widget background layer support)
 - **Niri** compositor (25.05+)
-- **curl**, required to download the engine and models automatically.
+- **curl**, **sha256sum** and **flock**, required to download and verify the engine automatically. `sha256sum` is provided by GNU coreutils, and `flock` by util-linux.
 - *Optional, only to build the engine yourself*: **Rust & Cargo**.
 
 ---
@@ -65,18 +65,19 @@ If Depthscape is also installed through the plugin registry, remove that copy fi
 
 ### 2. 🚀 First Launch
 
-There is nothing to install by hand. On first start Depthscape downloads the
-prebuilt engine and the Depth Anything V2 Small model (~99 MB), and reports progress with a toast. The engine is a single
-self-contained binary, so no system packages are needed.
+On first start Depthscape downloads the prebuilt engine and the Depth Anything V2 Small model (~99 MB), and reports progress with a toast. The prebuilt engine currently supports x86_64 Linux.
+
+The plugin pins the required engine release in `engine-version`. On startup it checks the managed binary in `bin/` against the recorded release and SHA-256 hash. If the version or hash does not match, Depthscape downloads the binary and checksum for that exact release, verifies the download, and replaces the managed binary. An old installation without a version record is downloaded again. If the download fails, the existing binary is kept and the settings page offers a retry.
+
+When releasing engine changes, set `engine-version` to the new release tag (for example `v0.6.1`) before tagging. A plugin-only release can retain an older engine tag; the release workflow checks that `engine/` still matches that tag. The pinned release and its engine asset must be published before users can download them.
 
 To build the engine yourself instead:
 
 ```bash
 cd engine && cargo build --release
-cp target/release/depthscape-engine ../bin/depthscape-engine
 ```
 
-*(You can also use **Build Engine** in the plugin’s Engine card, which appears when the engine is missing.)*
+Depthscape can find a locally built engine under `engine/target/` when there is no managed binary. To explicitly select your own engine, set `DEPTHSCAPE_ENGINE` to its absolute path in the Dux Shell environment. Custom engines are not updated by Depthscape; keep them compatible with the plugin. The **Build Engine** button in the settings can also build the engine when it is missing.
 
 ### 3. 🎛️ Configure
 

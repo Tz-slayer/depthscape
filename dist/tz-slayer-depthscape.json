@@ -10,7 +10,9 @@
         "daemon"
     ],
     "dependencies": [
-        "curl"
+        "curl",
+        "sha256sum",
+        "flock"
     ],
     "compositors": [
         "niri"

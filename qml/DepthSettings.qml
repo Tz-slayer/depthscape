@@ -70,7 +70,10 @@ PluginSettings {
             root.buildingEngine = false;
             if (exitCode === 0) {
                 root.buildOutput = "";
-                root.saveValue("action", "rescanEngine");
+                if (root.daemon && root.daemon.useBuiltEngine)
+                    root.daemon.useBuiltEngine();
+                else
+                    root.saveValue("action", "rescanEngine");
             } else if (root.buildOutput === "") {
                 root.buildOutput = I18n.trFor("depthscape", "Build failed (exit %1)").arg(exitCode);
             }
@@ -78,7 +81,7 @@ PluginSettings {
     }
 
     function buildEngine() {
-        if (root.buildingEngine || root.downloadingEngine)
+        if (root.buildingEngine || root.downloadingEngine || root.checkingEngine)
             return;
         root.buildingEngine = true;
         root.buildOutput = "";
@@ -203,6 +206,8 @@ PluginSettings {
     // Models & Daemon state
     readonly property bool daemonFound: root.daemon !== null
     readonly property bool engineFound: root.daemonFound && root.daemon.enginePath !== ""
+    readonly property bool customEngine: root.daemonFound && root.daemon.customEngine === true
+    readonly property bool checkingEngine: root.daemonFound && root.daemon.checkingEngine === true
     readonly property bool modelReady: {
         const list = root.availableModels || [];
         for (let i = 0; i < list.length; i++) {
@@ -213,9 +218,7 @@ PluginSettings {
     }
     readonly property bool modelBusy: root.daemonFound && root.daemon.modelBusy === true
     readonly property string engineProblem: root.daemonFound ? (root.daemon.engineProblem || "") : ""
-    /// Everything the engine card can act on. Ready means the card stays hidden.
-    readonly property bool engineNeedsAttention: !root.daemonFound || !root.engineFound
-        || root.modelBusy || !root.modelReady || root.engineProblem !== ""
+    readonly property string engineUpdateProblem: root.daemonFound ? (root.daemon.engineUpdateProblem || "") : ""
     readonly property var availableModels: root.daemonFound ? root.daemon.availableModels : []
 
     readonly property string currentModelType: "small"
@@ -232,6 +235,12 @@ PluginSettings {
             return root.buildOutput !== "" ? I18n.trFor("depthscape", "Building engine... %1").arg(root.buildOutput) : I18n.trFor("depthscape", "Building engine...");
         if (!root.daemonFound)
             return I18n.trFor("depthscape", "Plugin is starting. Reopen this page in a moment.");
+        if (root.checkingEngine)
+            return I18n.trFor("depthscape", "Checking engine...");
+        if (root.engineUpdateProblem !== "")
+            return root.engineUpdateProblem;
+        if (root.engineProblem !== "")
+            return root.engineProblem;
         if (!root.engineFound) {
             if (root.buildOutput !== "")
                 return root.buildOutput;
@@ -247,17 +256,23 @@ PluginSettings {
         }
         if (!root.modelReady)
             return I18n.trFor("depthscape", "Depth model not downloaded.");
-        return I18n.trFor("depthscape", "Ready · Depth model is ready.");
+        if (root.customEngine)
+            return I18n.trFor("depthscape", "Using a custom engine. Its version is not managed by Depthscape; update it yourself when upgrading the plugin.");
+        return I18n.trFor("depthscape", "Engine and depth model are ready.");
     }
 
     readonly property string statusIcon: root.downloadingEngine ? "hourglass_empty"
         : root.buildingEngine ? "hourglass_empty"
         : !root.daemonFound ? "hourglass_empty"
+        : root.checkingEngine ? "hourglass_empty"
+        : root.engineUpdateProblem !== "" ? "error"
         : !root.engineFound ? "download"
         : root.modelBusy ? "hourglass_empty"
         : (root.modelReady) ? "check_circle" : "info"
 
     readonly property color statusColor: {
+        if (root.engineUpdateProblem !== "")
+            return Theme.error;
         if (!root.engineFound)
             return (root.buildOutput !== "" && !root.buildingEngine && !root.downloadingEngine) ? Theme.error : Theme.warning;
         if (root.modelBusy || root.buildingEngine || root.downloadingEngine)
@@ -354,12 +369,8 @@ PluginSettings {
         }
     }
 
-    // Engine recovery. The engine and depth model are provisioned automatically,
-    // so in the normal case there is nothing to show and nothing to press -- the
-    // card is rendered only when something actually needs the user.
+    // Keep engine status visible while the daemon starts and checks the binary.
     SettingsCard {
-        visible: root.engineNeedsAttention
-
         SectionTitle {
             text: I18n.trFor("depthscape", "Engine")
             icon: "memory"
@@ -367,8 +378,7 @@ PluginSettings {
 
         SettingDivider {}
 
-        // Models are fixed now (Depth Anything V2 Small + IS-Net Anime) and are
-        // provisioned automatically on first run, so there is nothing to pick.
+        // The depth model is provisioned automatically on first run.
 
         // Status Card
         StyledRect {
@@ -416,9 +426,9 @@ PluginSettings {
                 text: I18n.trFor("depthscape", "Download Engine")
                 iconName: "download"
                 tooltipText: I18n.trFor("depthscape", "Download prebuilt binary from GitHub Releases (no Rust needed)")
-                visible: !root.engineFound
+                visible: (!root.engineFound || root.engineUpdateProblem !== "") && !root.customEngine
                 busy: root.downloadingEngine
-                enabled: root.daemonFound && !root.downloadingEngine && !root.buildingEngine
+                enabled: root.daemonFound && !root.checkingEngine && !root.downloadingEngine && !root.buildingEngine
                 onClicked: root.downloadEngine()
             }
 
@@ -426,17 +436,24 @@ PluginSettings {
                 text: I18n.trFor("depthscape", "Build Engine")
                 iconName: "build"
                 tooltipText: root.engineCommand
-                visible: !root.engineFound
+                visible: !root.engineFound && !root.customEngine
                 busy: root.buildingEngine
-                enabled: root.daemonFound && !root.buildingEngine && !root.downloadingEngine
+                enabled: root.daemonFound && !root.checkingEngine && !root.buildingEngine && !root.downloadingEngine
                 onClicked: root.buildEngine()
+            }
+
+            DButton {
+                text: I18n.trFor("depthscape", "Use managed engine")
+                visible: root.daemonFound && root.customEngine && !root.daemon.explicitEngine
+                enabled: !root.checkingEngine && !root.downloadingEngine && !root.buildingEngine
+                onClicked: root.daemon.useManagedEngine()
             }
 
             DButton {
                 text: I18n.trFor("depthscape", "Re-check Engine")
                 iconName: "refresh"
                 visible: !root.engineFound
-                enabled: root.daemonFound && !root.buildingEngine && !root.downloadingEngine
+                enabled: root.daemonFound && !root.checkingEngine && !root.buildingEngine && !root.downloadingEngine
                 onClicked: root.saveValue("action", "rescanEngine")
             }
 
